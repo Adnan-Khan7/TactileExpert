@@ -1,0 +1,17 @@
+{
+  "loss": 0.572034664452076,
+  "macro_f1": 0.65,
+  "per_option": {
+    "missing_parts": {
+      "f1": 0.65,
+      "precision": 0.5652,
+      "recall": 0.7647,
+      "auc": 0.8077,
+      "n_pos": 17,
+      "n_total": 58,
+      "f1_calibrated": 0.5294,
+      "threshold_calibrated": 0.7
+    }
+  },
+  "macro_f1_calibrated": 0.5294
+}

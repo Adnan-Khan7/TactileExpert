@@ -1,0 +1,17 @@
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+Pillow>=10.0.0
+gradio>=4.0.0
+
+# CLIP
+open-clip-torch>=2.24.0
+
+# VLM
+transformers>=4.45.0
+peft>=0.12.0
+qwen-vl-utils>=0.0.8
+accelerate>=0.30.0
+
+# Generation
+openai>=1.30.0

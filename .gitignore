@@ -1,0 +1,32 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# API keys / secrets
+.env
+api_key*
+*.key
+
+# Logs
+logs/
+*.log
+
+# Large data files
+images/
+*.jsonl
+*.xlsx
+*.csv
+~$*
+
+# Output / cache
+output/
+*.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor
+.claude/
+.gradio/
