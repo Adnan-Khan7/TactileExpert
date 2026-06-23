@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=def-majidk
 #SBATCH --job-name=tactile_expert
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=h100:1
 #SBATCH --cpus-per-task=4

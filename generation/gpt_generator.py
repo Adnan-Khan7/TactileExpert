@@ -84,10 +84,18 @@ def generate_tactile(
 # Editing (call 2 — refine existing candidate)
 # ---------------------------------------------------------------------------
 
+def _png_buffer(img: Image.Image, name: str) -> tuple[str, io.BytesIO, str]:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return (name, buf, "image/png")
+
+
 def edit_tactile(
     api_key: str,
     current_tactile: Image.Image,
     edit_instruction: str,
+    natural_reference: Image.Image | None = None,
     size: str = "1024x1024",
 ) -> Image.Image:
     """
@@ -98,6 +106,9 @@ def edit_tactile(
     api_key           : OpenAI API key — entered by user, used once, not stored.
     current_tactile   : The current tactile graphic as a PIL image.
     edit_instruction  : Plain-language edit instruction (from evaluator or user).
+    natural_reference : Optional natural reference photograph. When provided it
+                        is sent alongside the tactile graphic so the edit is
+                        grounded in the real object (user-toggled in the UI).
     size              : Image size string accepted by the API.
 
     Returns
@@ -108,19 +119,25 @@ def edit_tactile(
 
     client = OpenAI(api_key=api_key)
 
-    # Convert PIL image to PNG bytes for the API
-    buf = io.BytesIO()
-    current_tactile.save(buf, format="PNG")
-    buf.seek(0)
-
-    prompt = (
-        "This is a tactile graphic intended for embossing on swell paper. "
-        f"Apply the following correction while preserving all other features: {edit_instruction}"
-    )
+    images = [_png_buffer(current_tactile, "tactile.png")]
+    if natural_reference is not None:
+        images.append(_png_buffer(natural_reference.convert("RGB"), "reference.jpg"))
+        prompt = (
+            "The first image is a tactile graphic intended for embossing on swell "
+            "paper; the second image is the natural reference photograph of the "
+            "same object. Edit the FIRST image only. Use the reference photograph "
+            "to verify shapes, parts, and surface regions. Apply the following "
+            f"correction while preserving all other features: {edit_instruction}"
+        )
+    else:
+        prompt = (
+            "This is a tactile graphic intended for embossing on swell paper. "
+            f"Apply the following correction while preserving all other features: {edit_instruction}"
+        )
 
     response = client.images.edit(
         model="gpt-image-1",
-        image=("tactile.png", buf, "image/png"),
+        image=images if natural_reference is not None else images[0],
         prompt=prompt,
         size=size,
         n=1,

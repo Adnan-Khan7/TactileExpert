@@ -5,8 +5,8 @@ from pathlib import Path
 import torch
 
 from .constants import (
-    ALL_OPTIONS, VLM_THRESHOLDS, QUESTIONS,
-    DIMENSION_LABELS, EDIT_INSTRUCTIONS, SYSTEM_PROMPT,
+    ALL_OPTIONS, VLM_THRESHOLDS_CALIBRATED, QUESTIONS, SYSTEM_PROMPT,
+    DEFAULT_THRESHOLD_MODE, build_result,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -26,16 +26,20 @@ class VLMEvaluator:
         from qwen_vl_utils import process_vision_info
 
         self._process_vision_info = process_vision_info
-        self.thresholds = dict(VLM_THRESHOLDS)
+        self.calibrated_thresholds = dict(VLM_THRESHOLDS_CALIBRATED)
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
         lora_checkpoint = lora_checkpoint or (HERE.parent / "models" / "vlm_checkpoint")
 
-        print(f"[VLM Evaluator] Loading {model_path}  device={self.device}")
+        # bfloat16 on GPU; float32 on CPU (login-node fallback — bf16 matmuls
+        # are slow / unsupported on some CPU builds)
+        dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
+
+        print(f"[VLM Evaluator] Loading {model_path}  device={self.device}  dtype={dtype}")
         self.processor = AutoProcessor.from_pretrained(model_path, max_pixels=max_pixels)
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             attn_implementation="eager",
             device_map={"": self.device},
         )
@@ -81,23 +85,7 @@ class VLMEvaluator:
         """Raw prob_yes per option — no threshold applied."""
         return {opt: round(self._score_option(nat_path, tac_path, opt), 4) for opt in ALL_OPTIONS}
 
-    def evaluate(self, nat_path: str, tac_path: str) -> dict:
-        per_option: dict = {}
-        for opt in ALL_OPTIONS:
-            prob   = self._score_option(nat_path, tac_path, opt)
-            thresh = self.thresholds.get(opt, 0.5)
-            per_option[opt] = {
-                "prob_yes":         round(prob, 4),
-                "threshold":        thresh,
-                "flagged":          prob > thresh,
-                "dimension":        DIMENSION_LABELS.get(opt, ""),
-                "edit_instruction": EDIT_INSTRUCTIONS[opt] if prob > thresh else None,
-            }
-        flagged = sorted(
-            [o for o, d in per_option.items() if d["flagged"]],
-            key=lambda o: -per_option[o]["prob_yes"],
-        )
-        top = None
-        if flagged:
-            top = {"option": flagged[0], **per_option[flagged[0]]}
-        return {"options": per_option, "flagged": flagged, "top_issue": top, "all_clear": not flagged}
+    def evaluate(self, nat_path: str, tac_path: str,
+                 mode: str = DEFAULT_THRESHOLD_MODE) -> dict:
+        probs = self.score_pair(nat_path, tac_path)
+        return build_result(probs, self.calibrated_thresholds, mode)

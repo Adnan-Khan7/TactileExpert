@@ -7,22 +7,10 @@ import torch.nn as nn
 from PIL import Image
 
 from .constants import (
-    ALL_OPTIONS, CLIP_THRESHOLDS, DIMENSION_LABELS, EDIT_INSTRUCTIONS,
+    CLIP_THRESHOLDS_CALIBRATED, DEFAULT_THRESHOLD_MODE, build_result,
 )
 
 HERE = Path(__file__).resolve().parent
-
-
-def _build_result(per_option: dict) -> dict:
-    flagged = sorted(
-        [o for o, d in per_option.items() if d["flagged"]],
-        key=lambda o: -per_option[o]["prob_yes"],
-    )
-    top = None
-    if flagged:
-        t = flagged[0]
-        top = {"option": t, **per_option[t]}
-    return {"options": per_option, "flagged": flagged, "top_issue": top, "all_clear": not flagged}
 
 
 class CLIPProbeEvaluator:
@@ -45,12 +33,14 @@ class CLIPProbeEvaluator:
         models_dir = Path(models_dir) if models_dir else HERE.parent / "models" / "clip_probe"
 
         print("[CLIP Probe] Loading ViT-L/14 (laion2b_s32b_b82k)…")
-        self._clip, self._preprocess, _ = open_clip.create_model_and_transforms(
+        # Use the val transform (Resize + CenterCrop) — the train transform
+        # contains RandomResizedCrop, which makes inference nondeterministic.
+        self._clip, _, self._preprocess = open_clip.create_model_and_transforms(
             "ViT-L-14", pretrained="laion2b_s32b_b82k", device=self.device)
         self._clip.eval()
 
         self._heads: dict[str, tuple[nn.Module, list[str]]] = {}
-        self._thresholds: dict[str, float] = dict(CLIP_THRESHOLDS)
+        self.calibrated_thresholds: dict[str, float] = dict(CLIP_THRESHOLDS_CALIBRATED)
 
         for _dim, pt_name, options in self._HEAD_CONFIGS:
             ckpt = torch.load(models_dir / pt_name, map_location=self.device, weights_only=False)
@@ -66,7 +56,7 @@ class CLIPProbeEvaluator:
             self._heads[_dim] = (head, options)
             # Prefer thresholds stored in the checkpoint over defaults
             for opt, t in ckpt.get("calibrated_thresholds", {}).items():
-                self._thresholds[opt] = t
+                self.calibrated_thresholds[opt] = t
 
         print("[CLIP Probe] Ready.")
 
@@ -92,19 +82,7 @@ class CLIPProbeEvaluator:
                 probs[opt] = round(raw[j].item(), 4)
         return probs
 
-    def evaluate(self, nat_path: str, tac_path: str) -> dict:
-        feat = self._feat(nat_path, tac_path)
-        per_option: dict = {}
-        for _dim, (head, options) in self._heads.items():
-            probs = torch.sigmoid(head(feat))[0]
-            for j, opt in enumerate(options):
-                prob   = probs[j].item()
-                thresh = self._thresholds.get(opt, 0.5)
-                per_option[opt] = {
-                    "prob_yes":         round(prob, 4),
-                    "threshold":        thresh,
-                    "flagged":          prob > thresh,
-                    "dimension":        DIMENSION_LABELS.get(opt, ""),
-                    "edit_instruction": EDIT_INSTRUCTIONS[opt] if prob > thresh else None,
-                }
-        return _build_result(per_option)
+    def evaluate(self, nat_path: str, tac_path: str,
+                 mode: str = DEFAULT_THRESHOLD_MODE) -> dict:
+        probs = self.score_pair(nat_path, tac_path)
+        return build_result(probs, self.calibrated_thresholds, mode)

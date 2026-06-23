@@ -13,11 +13,14 @@ api_key*
 logs/
 *.log
 
-# Large data files
+# Large data files / model weights
 images/
+models/
 *.jsonl
 *.xlsx
 *.csv
+*.pt
+*.safetensors
 ~$*
 
 # Output / cache
