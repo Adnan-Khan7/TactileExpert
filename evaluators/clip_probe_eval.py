@@ -12,14 +12,40 @@ from .constants import (
 
 HERE = Path(__file__).resolve().parent
 
+# Curated category list for zero-shot object classification.
+# Covers the six TactileNet object families.  Editable by the user in the UI.
+OBJECT_CATEGORIES = [
+    # Animals & Creatures
+    "bat", "bee", "beluga whale", "bird", "butterfly", "camel", "cat", "crab",
+    "dinosaur", "dog", "dolphin", "elephant", "fish", "flamingo", "frog",
+    "giraffe", "gorilla", "horse", "jellyfish", "kangaroo", "lion", "lizard",
+    "monkey", "octopus", "owl", "parrot", "peacock", "penguin", "rabbit",
+    "shark", "snake", "spider", "tiger", "turtle", "whale", "wolf", "zebra",
+    # Food, Nature & Simple Objects
+    "apple", "banana", "cactus", "egg", "flower", "leaf", "mushroom",
+    "pineapple", "rose", "strawberry", "sunflower", "tree", "watermelon",
+    # Furniture & Structures
+    "bed", "bridge", "chair", "door", "hut", "lamp", "sofa", "table",
+    # Tools, Instruments & Appliances
+    "camera", "guitar", "hammer", "headphones", "kettle", "microscope",
+    "piano", "scissors", "telephone", "violin", "watch",
+    # Vehicles & Flight Systems
+    "airplane", "bicycle", "boat", "bus", "car", "helicopter", "motorcycle",
+    "rocket", "ship", "submarine", "train",
+    # Wearables & Accessories
+    "backpack", "glasses", "hat", "purse", "shoe", "umbrella",
+]
+
 
 class CLIPProbeEvaluator:
     """CLIP ViT-L/14 (laion2b_s32b_b82k) backbone + three 2-layer MLP task heads."""
 
     _HEAD_CONFIGS = [
-        ("QL", "ql_evaluator.pt", ["too_thick", "broken_lines"]),
+        ("QL", "ql_evaluator.pt", ["too_thick",   "broken_lines"]),
         ("QP", "qp_evaluator.pt", ["missing_parts"]),
         ("QT", "qt_evaluator.pt", ["missing_texture"]),
+        ("QE", "qe_evaluator.pt", ["extra_parts"]),
+        ("QN", "qn_evaluator.pt", ["non_conformant"]),
     ]
 
     def __init__(
@@ -58,6 +84,16 @@ class CLIPProbeEvaluator:
             for opt, t in ckpt.get("calibrated_thresholds", {}).items():
                 self.calibrated_thresholds[opt] = t
 
+        # Precompute text embeddings for zero-shot object classification.
+        # Uses the same CLIP backbone — no extra model or download.
+        import open_clip
+        tokenizer = open_clip.get_tokenizer("ViT-L-14")
+        prompts   = [f"a photo of a {c}" for c in OBJECT_CATEGORIES]
+        with torch.no_grad():
+            tokens = tokenizer(prompts).to(self.device)
+            self._text_features = self._clip.encode_text(tokens)
+            self._text_features /= self._text_features.norm(dim=-1, keepdim=True)
+
         print("[CLIP Probe] Ready.")
 
     @torch.no_grad()
@@ -86,3 +122,20 @@ class CLIPProbeEvaluator:
                  mode: str = DEFAULT_THRESHOLD_MODE) -> dict:
         probs = self.score_pair(nat_path, tac_path)
         return build_result(probs, self.calibrated_thresholds, mode)
+
+    @torch.no_grad()
+    def classify_object(self, pil_image: Image.Image,
+                        top_k: int = 1) -> list[tuple[str, float]]:
+        """Zero-shot object classification using the already-loaded CLIP backbone.
+
+        Returns a list of (category, confidence) tuples, highest confidence first.
+        Runs in ~10 ms — text embeddings are precomputed at init time.
+        """
+        img   = self._preprocess(pil_image.convert("RGB")).unsqueeze(0).to(self.device)
+        feat  = self._clip.encode_image(img)
+        feat  = feat / feat.norm(dim=-1, keepdim=True)
+        sims  = (feat @ self._text_features.T).squeeze(0)
+        probs = sims.softmax(dim=-1)
+        top   = probs.topk(min(top_k, len(OBJECT_CATEGORIES)))
+        return [(OBJECT_CATEGORIES[i], round(v.item(), 3))
+                for v, i in zip(top.values, top.indices)]

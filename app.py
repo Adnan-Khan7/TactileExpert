@@ -2,229 +2,309 @@
 """
 TactileExpert — Human-in-the-Loop Tactile Graphic Pipeline
 
-Gradio interface for generating, evaluating, and iteratively refining
-tactile graphics using GPT-image-1 and BANA-trained quality evaluators.
+Changes in this version:
+  1. Single API key for both generation and editing
+  2. Edit instruction box is the one editable field (no separate "additional feedback")
+  3. Edit log sidebar + context accumulation — previous corrections are summarised
+     and prepended to each new edit call (GPT-image-1 has no text memory)
+  4. Iteration Gallery (click any thumbnail to expand full-size) + badge strip
+  5. Save-to-Training section — annotate and save approved pairs to a local JSONL
+  6. Per-option evaluation table showing all selected models side by side
+  7. Model selection checkboxes — run only the models you want
+  8. Session export (JSON) — download the full session log
 
 Usage:
-    python app.py                        # local, port 7860
+    python app.py
     python app.py --port 7861
-    python app.py --model-path /path/to/Qwen2-VL-2B-Instruct
+    python app.py --no-share
 """
 
 import argparse
 import base64
 import io
+import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
 from PIL import Image
 
-from evaluators import CLIPProbeEvaluator, VLMEvaluator
+from evaluators import CLIPProbeEvaluator, VLMEvaluator, ResNetEvaluator, ViTEvaluator
 from evaluators.constants import (
-    ALL_OPTIONS, OPTION_DISPLAY, DEFAULT_THRESHOLD_MODE, build_result,
+    ALL_OPTIONS, OPTION_DISPLAY, DEFAULT_THRESHOLD_MODE,
+    EDIT_INSTRUCTIONS, build_result,
 )
-from generation.gpt_generator import build_prompt, generate_tactile, edit_tactile, BANA_TEMPLATE
+from generation.gpt_generator import (
+    build_prompt, generate_tactile, edit_tactile, BANA_TEMPLATE,
+)
 
-HERE = Path(__file__).resolve().parent
+HERE      = Path(__file__).resolve().parent
+TRAIN_DIR = HERE / "generated_training_data"
 
-# ---------------------------------------------------------------------------
-# Colour scheme (two models only)
-# ---------------------------------------------------------------------------
+AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16"]
 
 MODEL_COLOR = {
     "CLIP Probe":     "#e67e22",
     "VLM Fine-tuned": "#3498db",
+    "ResNet-50":      "#8e44ad",
+    "ViT-B/16":       "#27ae60",
 }
 
 MODE_LABELS = {
-    "Balanced (t = 0.50)":          "balanced",
-    "Calibrated (val F1-max)":      "calibrated",
+    "Balanced (t = 0.50)":    "balanced",
+    "Calibrated (val F1-max)": "calibrated",
 }
-MODE_DISPLAY = {v: k for k, v in MODE_LABELS.items()}
-DEFAULT_MODE_LABEL = MODE_DISPLAY[DEFAULT_THRESHOLD_MODE]
+MODE_DISPLAY    = {v: k for k, v in MODE_LABELS.items()}
+DEFAULT_MODE_LBL = MODE_DISPLAY[DEFAULT_THRESHOLD_MODE]
 
-ALL_CLEAR_KEYWORDS = {
-    "too_thick":       ["lines too thick", "strokes merge", "reduce line width"],
-    "broken_lines":    ["outline gap", "broken line", "missing edge segment"],
-    "missing_parts":   ["missing body part", "incomplete structure", "omitted feature"],
-    "missing_texture": ["add texture", "surface pattern missing", "region needs hatching"],
+# Map model name → (probs_key, cal_key) in the iteration dict
+_MODEL_KEYS = {
+    "CLIP Probe":     ("clip_probs",   "clip_cal"),
+    "VLM Fine-tuned": ("vlm_probs",    "vlm_cal"),
+    "ResNet-50":      ("resnet_probs", "resnet_cal"),
+    "ViT-B/16":       ("vit_probs",    "vit_cal"),
 }
 
-# ---------------------------------------------------------------------------
-# HTML helpers
-# ---------------------------------------------------------------------------
 
-def _thumb_uri(pil: Image.Image, max_side: int = 220) -> str:
-    """Small base64 JPEG data-URI for inline strip thumbnails."""
+# ── HTML helpers ──────────────────────────────────────────────────────────────
+
+def _thumb_uri(pil: Image.Image, size: int = 200) -> str:
     img = pil.copy()
-    img.thumbnail((max_side, max_side))
+    img.thumbnail((size, size))
     buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=80)
+    img.convert("RGB").save(buf, format="JPEG", quality=82)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def _prob_bar(prob: float, thresh: float, flagged: bool) -> str:
-    """Probability bar with a dark tick mark at the decision threshold."""
     pct   = int(prob * 100)
     tick  = int(thresh * 100)
     color = "#e74c3c" if flagged else "#27ae60"
     return (
-        f"<div style='position:relative;background:#eee;border-radius:4px;height:10px;margin:3px 0'>"
-        f"<div style='width:{pct}%;background:{color};height:10px;border-radius:4px'></div>"
-        f"<div style='position:absolute;left:{tick}%;top:-2px;width:2px;height:14px;"
-        f"background:#2c3e50' title='threshold {thresh}'></div>"
+        f"<div style='position:relative;background:#eee;border-radius:4px;"
+        f"height:8px;margin:3px 0'>"
+        f"<div style='width:{pct}%;background:{color};height:8px;border-radius:4px'></div>"
+        f"<div style='position:absolute;left:{tick}%;top:-2px;width:2px;height:12px;"
+        f"background:#2c3e50' title='threshold {thresh:.2f}'></div>"
         f"</div>"
     )
 
 
-def _eval_panel(model_name: str, result: dict | None) -> str:
-    color = MODEL_COLOR.get(model_name, "#555")
-    if result is None:
-        return (
-            f"<div style='border-left:4px solid {color};padding:10px;background:#fafafa;"
-            f"border-radius:6px;font-family:sans-serif;color:#aaa;font-size:13px'>"
-            f"<b style='color:{color}'>{model_name}</b><br>Not run yet.</div>"
+def _consensus_badge(flagged_by: list[str], total_models: int) -> str:
+    n = len(flagged_by)
+    if n == 0:
+        return "<span style='background:#27ae60;color:#fff;border-radius:3px;" \
+               "padding:1px 6px;font-size:11px'>ALL CLEAR</span>"
+    if n == total_models:
+        return "<span style='background:#c0392b;color:#fff;border-radius:3px;" \
+               "padding:1px 6px;font-size:11px'>BOTH FLAG</span>"
+    model_short = {"CLIP Probe": "CLIP", "VLM Fine-tuned": "VLM"}
+    who = " + ".join(model_short.get(m, m) for m in flagged_by)
+    return (f"<span style='background:#e67e22;color:#fff;border-radius:3px;"
+            f"padding:1px 6px;font-size:11px'>{who} only</span>")
+
+
+def _eval_table(model_results: dict, mode: str) -> str:
+    """Per-option table showing all selected models side by side."""
+    if not model_results:
+        return ("<div style='color:#aaa;font-family:sans-serif;font-size:13px;"
+                "padding:8px'>No evaluation results yet.</div>")
+
+    models = list(model_results.keys())
+    total  = len(models)
+
+    # Model verdict line (top)
+    header_parts = []
+    for m, res in model_results.items():
+        color = MODEL_COLOR.get(m, "#555")
+        n = len(res["flagged"])
+        verdict = ("all clear" if n == 0
+                   else f"{n} issue{'s' if n > 1 else ''} flagged")
+        verdict_color = "#27ae60" if n == 0 else "#e74c3c"
+        header_parts.append(
+            f"<span style='color:{color};font-weight:700'>{m}</span>: "
+            f"<span style='color:{verdict_color}'>{verdict}</span>"
         )
-    n_flag  = len(result["flagged"])
-    verdict = (
-        "<span style='color:#27ae60;font-weight:700'>all clear</span>" if n_flag == 0
-        else f"<span style='color:#e74c3c;font-weight:700'>{n_flag} issue{'s' if n_flag > 1 else ''} flagged</span>"
+    header_html = "&nbsp;&nbsp;|&nbsp;&nbsp;".join(header_parts)
+
+    # Column headers
+    col_w = f"{int(56 / total)}%"
+    head_row = (
+        f"<tr style='background:#f0f0f0'>"
+        f"<th style='text-align:left;padding:5px 8px;width:28%;font-size:12px'>Option</th>"
+        + "".join(
+            "<th style='text-align:center;padding:5px;width:{};font-size:12px;"
+            "color:{}'>{}</th>".format(col_w, MODEL_COLOR.get(m, "#555"), m)
+            for m in models
+        )
+        + f"<th style='text-align:center;padding:5px;width:16%;font-size:12px'>Consensus</th>"
+        f"</tr>"
     )
+
+    # One row per option
     rows = []
     for opt in ALL_OPTIONS:
-        d      = result["options"][opt]
-        prob   = d["prob_yes"]
-        thresh = d["threshold"]
-        flag   = d["flagged"]
-        label  = OPTION_DISPLAY[opt]
-        badge  = "<span style='color:#e74c3c;font-weight:700'>⚠ FLAGGED</span>" if flag \
-                 else "<span style='color:#27ae60;font-weight:700'>✓ clear</span>"
+        label = OPTION_DISPLAY[opt]
+        flagged_by = [m for m in models if opt in model_results[m]["flagged"]]
+
+        cells = []
+        for m in models:
+            d     = model_results[m]["options"][opt]
+            prob  = d["prob_yes"]
+            thresh = d["threshold"]
+            flag  = d["flagged"]
+            badge = (
+                "<span style='color:#e74c3c;font-size:10px;font-weight:700'>⚠ FLAG</span>"
+                if flag else
+                "<span style='color:#27ae60;font-size:10px'>✓</span>"
+            )
+            cells.append(
+                f"<td style='padding:4px 6px;text-align:center'>"
+                f"{badge}<br>"
+                f"{_prob_bar(prob, thresh, flag)}"
+                f"<span style='font-size:10px;color:#666'>p={prob:.2f} t={thresh:.2f}</span>"
+                f"</td>"
+            )
+
         rows.append(
-            f"<div style='margin-bottom:8px'>"
-            f"<div style='display:flex;justify-content:space-between'>"
-            f"<span style='font-size:12px;font-weight:600'>{label}</span>{badge}</div>"
-            f"{_prob_bar(prob, thresh, flag)}"
-            f"<span style='font-size:11px;color:#555'>p(defect) = {prob:.2f}"
-            f" &nbsp;·&nbsp; threshold = {thresh:.2f}"
-            f" &nbsp;·&nbsp; flag if p &gt; t</span>"
-            f"</div>"
+            f"<tr style='border-bottom:1px solid #f0f0f0'>"
+            f"<td style='padding:5px 8px;font-size:12px;font-weight:600'>{label}</td>"
+            + "".join(cells)
+            + f"<td style='padding:4px 6px;text-align:center'>"
+              f"{_consensus_badge(flagged_by, total)}</td>"
+            f"</tr>"
         )
-    body = "".join(rows)
-    mode_note = MODE_DISPLAY.get(result.get("mode", ""), "")
-    return (
-        f"<div style='border-left:4px solid {color};padding:10px;background:#fafafa;"
-        f"border-radius:6px;font-family:sans-serif;font-size:13px'>"
-        f"<div style='display:flex;justify-content:space-between;align-items:baseline'>"
-        f"<b style='color:{color};font-size:14px'>{model_name}</b>{verdict}</div>"
-        f"<div style='color:#999;font-size:11px;margin-top:2px'>thresholds: {mode_note}</div>"
-        f"<div style='margin-top:8px'>{body}</div></div>"
+
+    table = (
+        f"<div style='font-family:sans-serif'>"
+        f"<div style='font-size:13px;margin-bottom:8px'>{header_html}</div>"
+        f"<table style='width:100%;border-collapse:collapse;border:1px solid #e5e5e5;"
+        f"border-radius:6px;overflow:hidden'>"
+        f"{head_row}{''.join(rows)}</table></div>"
     )
+    return table
 
 
-def _strip_card(thumb_uri: str, label: str, badges_html: str) -> str:
-    return (
-        f"<div style='min-width:120px;max-width:150px;text-align:center;"
-        f"font-family:sans-serif;font-size:11px'>"
-        f"<img src='{thumb_uri}' style='width:110px;height:110px;object-fit:contain;"
-        f"border:1px solid #ddd;border-radius:6px;background:#fff'/>"
-        f"<div style='font-weight:600;margin:4px 0 3px'>{label}</div>"
-        f"<div>{badges_html}</div></div>"
-    )
-
-
-def _iteration_strip(state: list[dict], mode: str) -> str:
-    """Natural | Iter 0 | Iter 1 | ... with thumbnails and per-mode flag badges."""
+def _iteration_strip(state: list[dict], model_results_list: list[dict]) -> str:
+    """Compact badge-only strip below the Gallery."""
     if not state:
-        return ("<div style='color:#aaa;font-family:sans-serif;font-size:13px;"
-                "padding:8px'>No iterations yet.</div>")
+        return "<div style='color:#aaa;font-size:12px;font-family:sans-serif'>No iterations yet.</div>"
+
     cards = []
-
-    nat_pil = state[-1].get("nat_pil")
-    if nat_pil is not None:
-        ref_badge = ("<span style='background:#7f8c8d;color:#fff;border-radius:3px;"
-                     "padding:1px 5px;font-size:10px'>reference</span>")
-        cards.append(_strip_card(_thumb_uri(nat_pil), "Natural", ref_badge))
-
-    for it in state:
-        clip_res, vlm_res = _results(it, mode)
-        flagged = sorted(set(clip_res["flagged"]) | set(vlm_res["flagged"]),
-                         key=ALL_OPTIONS.index)
+    for i, (it, mr) in enumerate(zip(state, model_results_list)):
+        all_flagged = sorted(
+            {o for res in mr.values() for o in res["flagged"]},
+            key=ALL_OPTIONS.index,
+        )
         badges = " ".join(
             f"<span style='background:#e74c3c;color:#fff;border-radius:3px;"
-            f"padding:1px 5px;font-size:10px;margin:1px'>{OPTION_DISPLAY[o]}</span>"
-            for o in flagged
-        ) or ("<span style='background:#27ae60;color:#fff;border-radius:3px;"
-              "padding:1px 5px;font-size:10px'>all clear</span>")
-        cards.append(_strip_card(_thumb_uri(it["pil"]), it["label"], badges))
+            f"padding:1px 4px;font-size:10px'>{OPTION_DISPLAY[o]}</span>"
+            for o in all_flagged
+        ) or "<span style='background:#27ae60;color:#fff;border-radius:3px;" \
+             "padding:1px 4px;font-size:10px'>all clear</span>"
+        cards.append(
+            f"<div style='min-width:100px;text-align:center;font-family:sans-serif;"
+            f"font-size:11px'>"
+            f"<div style='font-weight:600;margin-bottom:3px'>{it['label']}</div>"
+            f"<div>{badges}</div></div>"
+        )
 
     return (
-        "<div style='display:flex;gap:12px;align-items:flex-start;"
-        "flex-wrap:nowrap;overflow-x:auto;padding:6px 0'>"
+        "<div style='display:flex;gap:10px;flex-wrap:nowrap;overflow-x:auto;"
+        "padding:6px 0;align-items:flex-start'>"
         + "".join(cards) + "</div>"
     )
 
 
-def _all_clear_guidance(user_keywords: str = "") -> str:
-    keyword_examples = []
-    for opts in ALL_CLEAR_KEYWORDS.values():
-        keyword_examples.extend(opts)
-    examples = " · ".join(f'"{k}"' for k in keyword_examples[:6])
-    user_note = (
-        f"<div style='margin-top:6px;font-size:12px;color:#555'>"
-        f"Your input: <i>\"{user_keywords}\"</i></div>" if user_keywords else ""
+def _edit_log_html(history: list[dict]) -> str:
+    if not history:
+        return ("<div style='color:#aaa;font-family:sans-serif;font-size:12px;"
+                "padding:6px'>No edits yet.</div>")
+
+    items = "".join(
+        f"<div style='margin-bottom:6px;padding:6px 8px;background:#f8f9fa;"
+        f"border-radius:4px;border-left:3px solid #3498db'>"
+        f"<span style='font-weight:700;color:#555;font-size:11px'>{h['label']}</span><br>"
+        f"<span style='font-size:12px;color:#222'>{h['instruction']}</span>"
+        f"</div>"
+        for h in history
     )
+
+    context = _build_context(history)
+    ctx_html = ""
+    if context:
+        ctx_html = (
+            f"<div style='margin-top:8px;padding:6px 8px;background:#fff3cd;"
+            f"border-radius:4px;font-size:11px;color:#555'>"
+            f"<b>Context sent to next API call:</b><br>"
+            f"<span style='color:#333'>{context[:300]}{'…' if len(context)>300 else ''}</span>"
+            f"</div>"
+        )
+
+    return (
+        f"<div style='font-family:sans-serif;max-height:280px;overflow-y:auto;"
+        f"padding:4px'>{items}{ctx_html}</div>"
+    )
+
+
+def _build_context(history: list[dict]) -> str:
+    """Compact context prefix built from the edit log, injected into next API call."""
+    if not history:
+        return ""
+    entries = "; ".join(f"{h['label']}: {h['instruction']}" for h in history)
+    return (
+        f"Context — previous corrections already applied to this image: {entries}. "
+        f"Do NOT redo these fixes. Focus only on any remaining issues."
+    )
+
+
+def _all_clear_html() -> str:
     return (
         "<div style='padding:12px 16px;background:#f0fff4;border:2px solid #27ae60;"
         "border-radius:8px;font-family:sans-serif'>"
-        "<div style='font-size:15px;font-weight:700;color:#27ae60'>✓ Both models see no defects</div>"
-        "<div style='margin-top:8px;font-size:13px;color:#1a1a1a;font-weight:600'>"
-        "If you have a specific concern, describe it in the box below.</div>"
-        "<div style='margin-top:4px;font-size:12px;color:#333'>"
-        f"Useful keywords: {examples}</div>"
-        f"{user_note}</div>"
+        "<div style='font-size:15px;font-weight:700;color:#27ae60'>✓ All selected models see no defects</div>"
+        "<div style='margin-top:6px;font-size:13px;color:#333'>"
+        "You can continue iterating if you see a remaining issue, or save this "
+        "pair to the training dataset.</div></div>"
     )
 
 
-def _api_error_msg(stage: str, e: Exception) -> str:
+def _api_error(stage: str, e: Exception) -> str:
     msg = str(e)
     if "billing" in msg.lower():
         return (
-            f"⚠ {stage} unavailable: the OpenAI account has hit its billing "
-            f"limit. Switch to <b>Eval only</b> mode (top of the left panel) "
-            f"to evaluate uploaded tactile graphics without API calls. "
+            f"⚠ {stage} blocked: OpenAI billing limit reached. "
+            f"Switch to <b>Eval only</b> mode to test without API calls. "
             f"<span style='color:#999;font-size:11px'>({msg})</span>"
         )
     return f"⚠ {stage} failed: {msg}"
 
 
-# ---------------------------------------------------------------------------
-# Threshold-mode plumbing
-# ---------------------------------------------------------------------------
-# Each iteration stores RAW probabilities plus the calibrated-threshold
-# snapshots, so switching mode re-renders instantly without re-inference.
+# ── Session helpers ───────────────────────────────────────────────────────────
 
-def _results(it: dict, mode: str) -> tuple[dict, dict]:
-    clip_res = build_result(it["clip_probs"], it["clip_cal"], mode)
-    vlm_res  = build_result(it["vlm_probs"],  it["vlm_cal"],  mode)
-    return clip_res, vlm_res
+def _get_results(it: dict, mode: str, selected: list[str]) -> dict:
+    """Return {model_name: result_dict} for selected models present in this iteration."""
+    out = {}
+    for m in selected:
+        pk, ck = _MODEL_KEYS[m]
+        if it.get(pk):
+            out[m] = build_result(it[pk], it[ck], mode)
+    return out
 
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
+# ── App ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", default="Qwen/Qwen2-VL-2B-Instruct")
     parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true", default=True,
-                        help="Create a public gradio.live URL (default on — "
-                             "cluster nodes are not reachable from outside)")
+    parser.add_argument("--share", action="store_true", default=True)
     parser.add_argument("--no-share", dest="share", action="store_false")
     args = parser.parse_args()
 
-    # Lazy-load evaluators once (heavy — keep alive for the session)
+    # Evaluator cache — CLIP loaded eagerly at startup (needed for first-upload
+    # object detection); all others lazy (only loaded when selected by user).
     _cache: dict = {}
 
     def _clip():
@@ -237,381 +317,554 @@ def main():
             _cache["vlm"] = VLMEvaluator(model_path=args.model_path)
         return _cache["vlm"]
 
-    # Session state: list of iteration dicts
-    # Each: {label, pil, nat_pil, nat_path, tac_path, clip_probs, vlm_probs,
-    #        clip_cal, vlm_cal}
-    _state: list[dict] = []
+    def _resnet():
+        if "resnet" not in _cache:
+            _cache["resnet"] = ResNetEvaluator()
+        return _cache["resnet"]
 
-    def _mode(mode_label: str) -> str:
-        return MODE_LABELS.get(mode_label, DEFAULT_THRESHOLD_MODE)
+    def _vit():
+        if "vit" not in _cache:
+            _cache["vit"] = ViTEvaluator()
+        return _cache["vit"]
 
-    def _evaluate_and_store(label: str, tac_pil, nat_pil, nat_path, tac_path) -> dict:
-        clip_probs = _clip().score_pair(nat_path, tac_path)
-        vlm_probs  = _vlm().score_pair(nat_path, tac_path)
+    print("[TactileExpert] Loading CLIP Probe (needed for object detection)…")
+    _clip()
+    print("[TactileExpert] Ready — starting UI.")
+
+    # Session state
+    _state:       list[dict] = []   # per-iteration data
+    _edit_history: list[dict] = []  # {label, instruction} per edit
+
+    def _mode(lbl: str) -> str:
+        return MODE_LABELS.get(lbl, DEFAULT_THRESHOLD_MODE)
+
+    def _run_evaluators(nat_path: str, tac_path: str,
+                        selected: list[str]) -> dict:
+        out = {}
+        if "CLIP Probe" in selected:
+            out["clip_probs"] = _clip().score_pair(nat_path, tac_path)
+            out["clip_cal"]   = dict(_clip().calibrated_thresholds)
+        if "VLM Fine-tuned" in selected:
+            out["vlm_probs"] = _vlm().score_pair(nat_path, tac_path)
+            out["vlm_cal"]   = dict(_vlm().calibrated_thresholds)
+        if "ResNet-50" in selected:
+            out["resnet_probs"] = _resnet().score_pair(nat_path, tac_path)
+            out["resnet_cal"]   = dict(_resnet().calibrated_thresholds)
+        if "ViT-B/16" in selected:
+            out["vit_probs"] = _vit().score_pair(nat_path, tac_path)
+            out["vit_cal"]   = dict(_vit().calibrated_thresholds)
+        return out
+
+    def _store_iteration(label, tac_pil, nat_pil, nat_path, tac_path,
+                         eval_data: dict, instruction: str = "") -> dict:
         it = {
-            "label":      label,
-            "pil":        tac_pil,
-            "nat_pil":    nat_pil,
-            "nat_path":   nat_path,
-            "tac_path":   tac_path,
-            "clip_probs": clip_probs,
-            "vlm_probs":  vlm_probs,
-            "clip_cal":   dict(_clip().calibrated_thresholds),
-            "vlm_cal":    dict(_vlm().calibrated_thresholds),
+            "label":       label,
+            "pil":         tac_pil,
+            "nat_pil":     nat_pil,
+            "nat_path":    nat_path,
+            "tac_path":    tac_path,
+            "instruction": instruction,
+            "timestamp":   datetime.now().isoformat(timespec="seconds"),
+            # Filled from eval_data (only models that were selected):
+            "clip_probs":   eval_data.get("clip_probs",   {}),
+            "clip_cal":     eval_data.get("clip_cal",     {}),
+            "vlm_probs":    eval_data.get("vlm_probs",    {}),
+            "vlm_cal":      eval_data.get("vlm_cal",      {}),
+            "resnet_probs": eval_data.get("resnet_probs", {}),
+            "resnet_cal":   eval_data.get("resnet_cal",   {}),
+            "vit_probs":    eval_data.get("vit_probs",    {}),
+            "vit_cal":      eval_data.get("vit_cal",      {}),
         }
         _state.append(it)
         return it
 
-    def _render_latest(mode: str, selected_model: str, user_note: str = ""):
-        """Panels, strip, all-clear box, and edit-box prefill for current state."""
+    def _gallery_data() -> list:
+        """PIL images + captions for gr.Gallery."""
+        items = []
+        if _state and _state[-1].get("nat_pil"):
+            items.append((_state[-1]["nat_pil"], "Natural reference"))
+        for it in _state:
+            items.append((it["pil"], it["label"]))
+        return items
+
+    def _render(mode_lbl: str, selected: list[str]):
+        mode = _mode(mode_lbl)
         if not _state:
             return (
-                _eval_panel("CLIP Probe", None),
-                _eval_panel("VLM Fine-tuned", None),
-                _iteration_strip([], mode),
+                _eval_table({}, mode),
                 gr.update(value="", visible=False),
+                _iteration_strip([], []),
+                _edit_log_html([]),
+                _gallery_data(),
                 gr.update(value=""),
             )
-        clip_res, vlm_res = _results(_state[-1], mode)
-        all_clear = clip_res["all_clear"] and vlm_res["all_clear"]
-        sel = clip_res if selected_model == "CLIP Probe" else vlm_res
-        prefill = sel["top_issue"]["edit_instruction"] if sel["top_issue"] else ""
+        it = _state[-1]
+        mr = _get_results(it, mode, selected)
+
+        # All-model-results list for badge strip
+        mr_list = [_get_results(s, mode, selected) for s in _state]
+
+        all_clear = all(r["all_clear"] for r in mr.values()) if mr else False
+
+        # Edit instruction prefill from first flagged model
+        prefill = ""
+        for m in selected:
+            if m in mr and mr[m]["top_issue"]:
+                prefill = mr[m]["top_issue"]["edit_instruction"] or ""
+                break
+
         return (
-            _eval_panel("CLIP Probe", clip_res),
-            _eval_panel("VLM Fine-tuned", vlm_res),
-            _iteration_strip(_state, mode),
-            gr.update(value=_all_clear_guidance(user_note) if all_clear else "",
+            _eval_table(mr, mode),
+            gr.update(value=_all_clear_html() if all_clear else "",
                       visible=all_clear),
+            _iteration_strip(_state, mr_list),
+            _edit_log_html(_edit_history),
+            _gallery_data(),
             gr.update(value=prefill),
         )
 
-    # ---- Callbacks --------------------------------------------------------
+    # ── Callbacks ──────────────────────────────────────────────────────────────
 
-    def on_generate(nat_pil, object_desc, prompt_text, api_key_gen,
-                    mode_label, selected_model):
-        mode = _mode(mode_label)
+    def on_generate(nat_pil, object_desc, prompt_text, api_key,
+                    mode_lbl, selected_models):
         if nat_pil is None:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(),
-                "⚠ Please upload a natural reference image first.",
-            )
-        if not api_key_gen.strip():
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(),
-                "⚠ API key required for generation.",
-            )
+            return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
+        if not api_key.strip():
+            return (gr.update(),) * 7 + ("⚠ API key required.",)
 
         prompt = prompt_text.strip() or build_prompt(object_desc or "the object")
 
         nat_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         nat_pil.save(nat_tmp.name, format="JPEG")
-        nat_path = nat_tmp.name
 
         try:
-            tac_pil = generate_tactile(api_key=api_key_gen.strip(), prompt=prompt)
+            tac_pil = generate_tactile(api_key=api_key.strip(), prompt=prompt)
         except Exception as e:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(),
-                _api_error_msg("Generation", e),
-            )
+            return (gr.update(),) * 7 + (_api_error("Generation", e),)
 
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tac_pil.save(tac_tmp.name, format="JPEG")
 
-        _evaluate_and_store(f"Iter {len(_state)}", tac_pil, nat_pil,
-                            nat_path, tac_tmp.name)
+        eval_data = _run_evaluators(nat_tmp.name, tac_tmp.name, selected_models)
+        _store_iteration(f"Iter {len(_state)}", tac_pil, nat_pil,
+                         nat_tmp.name, tac_tmp.name, eval_data,
+                         instruction=f"[generated] {prompt[:80]}")
 
-        clip_html, vlm_html, strip, clear_box, edit_prefill = \
-            _render_latest(mode, selected_model)
-        return (
-            tac_pil, clip_html, vlm_html, strip, clear_box,
-            gr.update(interactive=True), edit_prefill, "",
-        )
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
 
-    def on_eval_upload(nat_pil, tac_pil, mode_label, selected_model):
-        """Eval-only mode: evaluate an uploaded tactile graphic, no API calls."""
-        mode = _mode(mode_label)
+    def on_eval_upload(nat_pil, tac_pil, mode_lbl, selected_models):
         if nat_pil is None:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(),
-                "⚠ Please upload a natural reference image first.",
-            )
+            return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
         if tac_pil is None:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(), gr.update(),
-                "⚠ Please upload a tactile graphic to evaluate.",
-            )
+            return (gr.update(),) * 7 + ("⚠ Upload a tactile graphic to evaluate.",)
 
         nat_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         nat_pil.save(nat_tmp.name, format="JPEG")
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        tac_pil = tac_pil.convert("RGB")
-        tac_pil.save(tac_tmp.name, format="JPEG")
+        tac_pil.convert("RGB").save(tac_tmp.name, format="JPEG")
 
-        _evaluate_and_store(f"Iter {len(_state)}", tac_pil, nat_pil,
-                            nat_tmp.name, tac_tmp.name)
+        eval_data = _run_evaluators(nat_tmp.name, tac_tmp.name, selected_models)
+        _store_iteration(f"Iter {len(_state)}", tac_pil.convert("RGB"), nat_pil,
+                         nat_tmp.name, tac_tmp.name, eval_data)
 
-        clip_html, vlm_html, strip, clear_box, edit_prefill = \
-            _render_latest(mode, selected_model)
-        return (
-            tac_pil, clip_html, vlm_html, strip, clear_box,
-            gr.update(interactive=True), edit_prefill, "",
-        )
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
 
-    def on_edit(edit_text, user_note, api_key_edit, include_nat,
-                mode_label, selected_model):
-        mode = _mode(mode_label)
+    def on_edit(edit_text, api_key, include_nat, use_context,
+                mode_lbl, selected_models):
         if not _state:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(),
-                "⚠ No iteration to edit yet — generate first.",
-            )
-        if not api_key_edit.strip():
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(),
-                "⚠ API key required for editing.",
-            )
+            return (gr.update(),) * 6 + ("⚠ Generate first.",)
+        if not api_key.strip():
+            return (gr.update(),) * 6 + ("⚠ API key required.",)
+
+        instruction = edit_text.strip()
+        if not instruction:
+            return (gr.update(),) * 6 + ("⚠ Provide an edit instruction.",)
+
+        # Inject accumulated context
+        full_instruction = instruction
+        if use_context and _edit_history:
+            ctx = _build_context(_edit_history)
+            full_instruction = ctx + " Now: " + instruction
 
         last = _state[-1]
-        instruction = edit_text.strip()
-        if user_note.strip():
-            instruction = (instruction + " " + user_note.strip()).strip()
-        if not instruction:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(),
-                "⚠ Please provide an edit instruction.",
-            )
-
         try:
             new_tac = edit_tactile(
-                api_key=api_key_edit.strip(),
+                api_key=api_key.strip(),
                 current_tactile=last["pil"],
-                edit_instruction=instruction,
+                edit_instruction=full_instruction,
                 natural_reference=last["nat_pil"] if include_nat else None,
             )
         except Exception as e:
-            return (
-                gr.update(), gr.update(), gr.update(), gr.update(),
-                gr.update(), gr.update(),
-                _api_error_msg("Edit", e),
-            )
+            return (gr.update(),) * 6 + (_api_error("Edit", e),)
 
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         new_tac.save(tac_tmp.name, format="JPEG")
 
-        _evaluate_and_store(f"Iter {len(_state)}", new_tac, last["nat_pil"],
-                            last["nat_path"], tac_tmp.name)
+        eval_data = _run_evaluators(last["nat_path"], tac_tmp.name, selected_models)
+        _store_iteration(f"Iter {len(_state)}", new_tac, last["nat_pil"],
+                         last["nat_path"], tac_tmp.name, eval_data,
+                         instruction=instruction)
 
-        clip_html, vlm_html, strip, clear_box, edit_prefill = \
-            _render_latest(mode, selected_model, user_note)
-        return (
-            new_tac, clip_html, vlm_html, strip, clear_box, edit_prefill, "",
-        )
+        # Append to edit log (user-visible instruction, not the context-prefixed one)
+        _edit_history.append({"label": f"Iter {len(_state)-1}", "instruction": instruction})
 
-    def on_view_change(mode_label, selected_model):
-        """Re-render everything when threshold mode or trusted model changes."""
-        clip_html, vlm_html, strip, clear_box, edit_prefill = \
-            _render_latest(_mode(mode_label), selected_model)
-        return clip_html, vlm_html, strip, clear_box, edit_prefill
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        return new_tac, tbl, clear, strip, log, gallery, prefill, ""
+
+    def on_view_change(mode_lbl, selected_models):
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        return tbl, clear, strip, log, gallery, prefill
+
+    def on_save_to_train(label_selections: list, mode_lbl: str, selected_models: list):
+        if not _state:
+            return "⚠ Nothing to save yet."
+        it = _state[-1]
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pair_dir = TRAIN_DIR / f"pair_{ts}"
+        pair_dir.mkdir(parents=True, exist_ok=True)
+
+        nat_out = pair_dir / "natural.jpg"
+        tac_out = pair_dir / "tactile.jpg"
+        it["nat_pil"].save(nat_out, format="JPEG", quality=95)
+        it["pil"].save(tac_out,    format="JPEG", quality=95)
+
+        record = {
+            "pair_id":       f"generated/{ts}/natural.jpg::generated/{ts}/tactile.jpg",
+            "natural_image": str(nat_out.relative_to(TRAIN_DIR)),
+            "tactile_image": str(tac_out.relative_to(TRAIN_DIR)),
+            "source":        "gpt-image-1",
+            "iteration":     it["label"],
+            "saved_at":      datetime.now().isoformat(timespec="seconds"),
+        }
+        for opt in ALL_OPTIONS:
+            record[opt] = 1 if opt in label_selections else 0
+
+        ann_file = TRAIN_DIR / "annotations.jsonl"
+        with open(ann_file, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
+        return f"✅ Saved to generated_training_data/pair_{ts}/"
+
+    def on_export_session():
+        if not _state:
+            return None
+        data = {
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "iterations":  [
+                {k: v for k, v in it.items()
+                 if k not in ("pil", "nat_pil")}
+                for it in _state
+            ],
+            "edit_history": _edit_history,
+        }
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".json", delete=False, mode="w")
+        json.dump(data, tmp, indent=2)
+        tmp.close()
+        return tmp.name
 
     def on_reset():
         _state.clear()
+        _edit_history.clear()
+        empty_tbl = _eval_table({}, DEFAULT_THRESHOLD_MODE)
         return (
-            None, None,
-            _eval_panel("CLIP Probe", None),
-            _eval_panel("VLM Fine-tuned", None),
-            _iteration_strip([], DEFAULT_THRESHOLD_MODE),
+            None, None, empty_tbl,
             gr.update(value="", visible=False),
-            gr.update(interactive=False),
-            "", "",
+            _iteration_strip([], []),
+            _edit_log_html([]),
+            [],
+            gr.update(value=""),
+            "",
         )
 
-    # ---- UI ---------------------------------------------------------------
+    # ── UI ────────────────────────────────────────────────────────────────────
 
-    with gr.Blocks(
-        title="TactileExpert",
-        theme=gr.themes.Soft(),
-        css=".gradio-container{max-width:1300px!important}",
-    ) as demo:
+    with gr.Blocks(title="TactileExpert") as demo:
 
-        gr.Markdown("""
-# TactileExpert — Tactile Graphic Pipeline
-Upload a natural reference photograph, generate a tactile graphic via GPT-image-1,
-evaluate it with CLIP Probe and VLM Fine-tuned, then iteratively refine.
-""")
+        gr.Markdown(
+            "# TactileExpert — Tactile Graphic Pipeline\n"
+            "Generate, evaluate, and iteratively refine tactile graphics. "
+            "GPT-image-1 carries the image forward but **not** the text — "
+            "previous corrections are summarised and injected as context automatically."
+        )
 
-        err_box = gr.HTML(value="", visible=True)
+        err_box = gr.HTML(value="")
 
         with gr.Row():
 
-            # ---- Left column: inputs ----------------------------------------
+            # ── Left column ───────────────────────────────────────────────────
             with gr.Column(scale=1, min_width=320):
 
                 ui_mode = gr.Radio(
                     choices=["Full pipeline", "Eval only"],
                     value="Full pipeline",
                     label="Mode",
-                    info="Full pipeline: generate + edit via GPT-image-1. "
-                         "Eval only: upload tactile graphics and run the "
-                         "evaluators — no API calls (testing / development).",
                 )
 
                 gr.Markdown("### 1 — Reference Image")
-                nat_img = gr.Image(label="Natural Reference Photograph (mandatory)",
-                                   type="pil", height=220)
+                nat_img = gr.Image(label="Natural reference photograph (mandatory)",
+                                   type="pil", height=200)
+                detect_status = gr.Markdown(
+                    value="",
+                    visible=False,
+                )
 
+                # ── Full pipeline ─────────────────────────────────────────────
                 with gr.Group(visible=True) as gen_group:
-                    gr.Markdown("### 2 — Generation prompt")
+                    gr.Markdown("### 2 — Generation")
                     object_desc = gr.Textbox(
-                        label="Object name / description",
-                        placeholder="e.g. a horse, a bicycle, a potted cactus",
+                        label="Object name",
+                        placeholder="e.g. a horse, a potted cactus",
                         lines=1,
                     )
                     prompt_box = gr.Textbox(
-                        label="Full BANA prompt (auto-filled from object name — editable)",
+                        label="BANA prompt (auto-filled — editable)",
                         value=BANA_TEMPLATE.format(object_description="the object"),
-                        lines=8,
+                        lines=7,
                     )
                     object_desc.change(
-                        fn=lambda d: build_prompt(d) if d.strip() else BANA_TEMPLATE.format(object_description="the object"),
-                        inputs=object_desc,
-                        outputs=prompt_box,
+                        fn=lambda d: (build_prompt(d) if d.strip()
+                                      else BANA_TEMPLATE.format(object_description="the object")),
+                        inputs=object_desc, outputs=prompt_box,
                     )
 
-                    api_key_gen = gr.Textbox(
-                        label="OpenAI API key — Generation (call 1)",
-                        placeholder="sk-...",
-                        type="password",
-                        lines=1,
-                    )
+                # ── Single API key (shared for gen + edit) ────────────────────
+                api_key = gr.Textbox(
+                    label="OpenAI API key",
+                    placeholder="sk-…",
+                    type="password",
+                    lines=1,
+                )
+
+                with gr.Group(visible=True) as gen_btn_group:
                     gen_btn = gr.Button("Generate tactile graphic", variant="primary")
 
+                # ── Eval-only upload ──────────────────────────────────────────
                 with gr.Group(visible=False) as upload_group:
-                    gr.Markdown("### 2 — Tactile graphic to evaluate")
+                    gr.Markdown("### 2 — Upload tactile to evaluate")
                     tac_upload = gr.Image(
-                        label="Tactile graphic (upload each new iteration here)",
-                        type="pil", height=220,
-                    )
-                    eval_btn = gr.Button("Evaluate tactile graphic",
-                                         variant="primary")
+                        label="Tactile graphic", type="pil", height=200)
+                    eval_btn = gr.Button("Evaluate", variant="primary")
 
-                with gr.Group(visible=True) as edit_group:
-                    gr.Markdown("### 3 — Edit")
+                gr.Markdown("### 3 — Edit")
 
-                    model_radio = gr.Radio(
-                        choices=["CLIP Probe", "VLM Fine-tuned"],
-                        value="CLIP Probe",
-                        label="Use verdict from",
-                    )
-                    edit_box = gr.Textbox(
-                        label="Edit instruction (auto-filled — editable)",
-                        placeholder="Will populate after generation…",
-                        lines=3,
-                    )
-                    user_note = gr.Textbox(
-                        label="Your additional feedback (optional — appended to instruction)",
-                        placeholder="e.g. the tail texture is too faint, add diagonal hatching",
-                        lines=2,
-                    )
-                    include_nat_cb = gr.Checkbox(
-                        label="Include natural reference photo in the edit call "
-                              "(grounds the correction in the real object)",
-                        value=True,
-                    )
-                    api_key_edit = gr.Textbox(
-                        label="OpenAI API key — Editing (call 2)",
-                        placeholder="sk-...",
-                        type="password",
-                        lines=1,
-                    )
-                    edit_btn = gr.Button("Apply edit", variant="secondary",
-                                         interactive=False)
+                model_select = gr.CheckboxGroup(
+                    choices=AVAILABLE_MODELS,
+                    value=AVAILABLE_MODELS,
+                    label="Run evaluators",
+                )
+                trusted_radio = gr.Radio(
+                    choices=AVAILABLE_MODELS,
+                    value="CLIP Probe",
+                    label="Pre-fill edit instruction from",
+                )
+                edit_box = gr.Textbox(
+                    label="Edit instruction (auto-filled — editable)",
+                    placeholder="Will populate after first evaluation…",
+                    lines=3,
+                )
+                include_nat_cb = gr.Checkbox(
+                    label="Include natural reference in edit call",
+                    value=True,
+                )
+                use_context_cb = gr.Checkbox(
+                    label="Inject edit history as context (recommended — GPT has no text memory)",
+                    value=True,
+                )
+
+                with gr.Group(visible=True) as edit_btn_group:
+                    edit_btn = gr.Button("Apply edit", variant="secondary")
 
                 gr.Markdown("---")
-                reset_btn = gr.Button("Reset session", variant="stop", size="sm")
+                reset_btn   = gr.Button("Reset session", variant="stop", size="sm")
+                export_btn  = gr.Button("Export session (JSON)", size="sm")
+                export_file = gr.File(label="Session export", visible=False)
 
-            # ---- Right column: outputs --------------------------------------
+            # ── Right column ───────────────────────────────────────────────────
             with gr.Column(scale=2):
 
-                gr.Markdown("### Current tactile candidate")
-                tac_out = gr.Image(label="Latest tactile graphic", height=300)
+                gr.Markdown("### Current candidate")
+                tac_out = gr.Image(label="Latest tactile graphic", height=280)
 
-                gr.Markdown("### Evaluation")
                 mode_radio = gr.Radio(
                     choices=list(MODE_LABELS.keys()),
-                    value=DEFAULT_MODE_LABEL,
+                    value=DEFAULT_MODE_LBL,
                     label="Decision thresholds",
-                    info="Balanced: every option flags at p > 0.50. "
-                         "Calibrated: per-option thresholds tuned for max F1 on "
-                         "the validation split (tick mark on each bar).",
                 )
-                with gr.Row():
-                    clip_panel = gr.HTML(_eval_panel("CLIP Probe", None))
-                    vlm_panel  = gr.HTML(_eval_panel("VLM Fine-tuned", None))
 
+                gr.Markdown("### Evaluation — all models")
+                eval_table = gr.HTML(_eval_table({}, DEFAULT_THRESHOLD_MODE))
                 all_clear_box = gr.HTML(value="", visible=False)
 
-                gr.Markdown("### Iteration history")
-                strip_html = gr.HTML(_iteration_strip([], DEFAULT_THRESHOLD_MODE))
+                with gr.Tabs():
 
-        # ---- Wire up --------------------------------------------------------
+                    with gr.Tab("Iteration Gallery"):
+                        gr.Markdown(
+                            "*Click any image to expand. "
+                            "Natural reference shown first.*"
+                        )
+                        iter_gallery = gr.Gallery(
+                            label="Iterations",
+                            columns=6,
+                            height=260,
+                            object_fit="contain",
+                        )
+                        strip_html = gr.HTML(
+                            _iteration_strip([], []),
+                            label="Defect badges",
+                        )
+
+                    with gr.Tab("Edit Log"):
+                        gr.Markdown(
+                            "Every edit instruction is logged here. "
+                            "When *Inject edit history as context* is enabled, "
+                            "a compact summary is prepended to each new edit call — "
+                            "because GPT-image-1 receives a fresh text prompt every time."
+                        )
+                        edit_log_html = gr.HTML(_edit_log_html([]))
+
+                    with gr.Tab("Save to Training"):
+                        gr.Markdown(
+                            "Approve the current iteration and save it as a "
+                            "training pair. Adjust the defect labels as needed — "
+                            "they are pre-filled from the evaluation. "
+                            "Saved to `generated_training_data/annotations.jsonl`."
+                        )
+                        save_labels = gr.CheckboxGroup(
+                            choices=[(OPTION_DISPLAY[o], o) for o in ALL_OPTIONS],
+                            value=[],
+                            label="Defects present (uncheck = this pair is clean for this option)",
+                        )
+                        save_btn  = gr.Button("Save to training data", variant="primary")
+                        save_status = gr.Markdown()
+
+        # ── Wiring ──────────────────────────────────────────────────────────────
+
+        _gen_outputs = [tac_out, eval_table, all_clear_box,
+                        strip_html, edit_log_html, iter_gallery, edit_box, err_box]
 
         gen_btn.click(
             fn=on_generate,
-            inputs=[nat_img, object_desc, prompt_box, api_key_gen,
-                    mode_radio, model_radio],
-            outputs=[tac_out, clip_panel, vlm_panel, strip_html,
-                     all_clear_box, edit_btn, edit_box, err_box],
+            inputs=[nat_img, object_desc, prompt_box, api_key,
+                    mode_radio, model_select],
+            outputs=_gen_outputs,
         )
 
         eval_btn.click(
             fn=on_eval_upload,
-            inputs=[nat_img, tac_upload, mode_radio, model_radio],
-            outputs=[tac_out, clip_panel, vlm_panel, strip_html,
-                     all_clear_box, edit_btn, edit_box, err_box],
+            inputs=[nat_img, tac_upload, mode_radio, model_select],
+            outputs=_gen_outputs,
         )
+
+        _edit_outputs = [tac_out, eval_table, all_clear_box,
+                         strip_html, edit_log_html, iter_gallery, edit_box, err_box]
+
+        edit_btn.click(
+            fn=on_edit,
+            inputs=[edit_box, api_key, include_nat_cb, use_context_cb,
+                    mode_radio, model_select],
+            outputs=_edit_outputs,
+        )
+
+        _view_outputs = [eval_table, all_clear_box,
+                         strip_html, edit_log_html, iter_gallery, edit_box]
+
+        for ctrl in (mode_radio, model_select, trusted_radio):
+            ctrl.change(
+                fn=on_view_change,
+                inputs=[mode_radio, model_select],
+                outputs=_view_outputs,
+            )
 
         ui_mode.change(
             fn=lambda m: (
                 gr.update(visible=m == "Full pipeline"),
-                gr.update(visible=m != "Full pipeline"),
                 gr.update(visible=m == "Full pipeline"),
+                gr.update(visible=m != "Full pipeline"),
             ),
             inputs=ui_mode,
-            outputs=[gen_group, upload_group, edit_group],
+            outputs=[gen_group, gen_btn_group, upload_group],
         )
-
-        edit_btn.click(
-            fn=on_edit,
-            inputs=[edit_box, user_note, api_key_edit, include_nat_cb,
-                    mode_radio, model_radio],
-            outputs=[tac_out, clip_panel, vlm_panel, strip_html,
-                     all_clear_box, edit_box, err_box],
-        )
-
-        for ctrl in (mode_radio, model_radio):
-            ctrl.change(
-                fn=on_view_change,
-                inputs=[mode_radio, model_radio],
-                outputs=[clip_panel, vlm_panel, strip_html, all_clear_box, edit_box],
-            )
 
         reset_btn.click(
             fn=on_reset,
-            outputs=[nat_img, tac_out, clip_panel, vlm_panel, strip_html,
-                     all_clear_box, edit_btn, edit_box, user_note],
+            outputs=[nat_img, tac_out, eval_table, all_clear_box,
+                     strip_html, edit_log_html, iter_gallery, edit_box, err_box],
         )
 
+        # ── Object auto-detection on image upload ──────────────────────────────
+        def on_nat_upload(pil):
+            """Classify the uploaded natural image and prefill the object name.
+
+            Only runs if CLIP is already in memory (i.e. from a prior session
+            action that triggered lazy-loading).  If not yet loaded the field
+            is left blank — the user fills it manually.
+            """
+            if pil is None:
+                return gr.update(value=""), gr.update(visible=False)
+            try:
+                hits = _clip().classify_object(pil, top_k=3)
+                top_name, top_conf = hits[0]
+                alts = ", ".join(f"{n} ({c:.0%})" for n, c in hits[1:])
+                note = (
+                    f"*Detected: **{top_name}** ({top_conf:.0%} confidence)"
+                    + (f" — alternatives: {alts}" if alts else "")
+                    + " — edit if wrong*"
+                )
+                return gr.update(value=top_name), gr.update(value=note, visible=True)
+            except Exception:
+                return gr.update(value=""), gr.update(visible=False)
+
+        nat_img.change(
+            fn=on_nat_upload,
+            inputs=nat_img,
+            outputs=[object_desc, detect_status],
+        )
+
+        export_btn.click(
+            fn=on_export_session,
+            outputs=export_file,
+        ).then(
+            fn=lambda f: gr.update(visible=f is not None),
+            inputs=export_file,
+            outputs=export_file,
+        )
+
+        def _prefill_save_labels(mode_lbl, selected_models):
+            if not _state:
+                return gr.update(value=[])
+            it    = _state[-1]
+            mode  = _mode(mode_lbl)
+            mr    = _get_results(it, mode, selected_models)
+            flagged = sorted(
+                {o for res in mr.values() for o in res["flagged"]},
+                key=ALL_OPTIONS.index,
+            )
+            return gr.update(value=flagged)
+
+        # Pre-fill save labels when switching to Save tab or after any eval
+        save_btn.click(
+            fn=on_save_to_train,
+            inputs=[save_labels, mode_radio, model_select],
+            outputs=save_status,
+        )
+
+        # Prefill save labels whenever eval runs
+        for btn in (gen_btn, eval_btn, edit_btn):
+            btn.click(
+                fn=_prefill_save_labels,
+                inputs=[mode_radio, model_select],
+                outputs=save_labels,
+            )
+
     demo.queue()
-    demo.launch(server_name="0.0.0.0", server_port=args.port, share=args.share)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=args.port,
+        share=args.share,
+    )
 
 
 if __name__ == "__main__":

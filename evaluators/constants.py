@@ -1,19 +1,34 @@
-"""Shared vocabulary and configuration for TactileExpert evaluators."""
+"""Shared vocabulary and configuration for TactileExpert evaluators.
 
-ALL_OPTIONS = ["too_thick", "broken_lines", "missing_parts", "missing_texture"]
+v2 — June 2026: expanded from 4 to 6 options after full manual annotation
+pass (987 pairs).  All four model families retrained on new splits_v2.
+"""
+
+ALL_OPTIONS = [
+    "too_thick",
+    "broken_lines",
+    "missing_parts",
+    "missing_texture",
+    "extra_parts",
+    "non_conformant",
+]
 
 OPTION_DISPLAY = {
     "too_thick":       "Too Thick",
     "broken_lines":    "Broken Lines",
     "missing_parts":   "Missing Parts",
     "missing_texture": "Missing Texture",
+    "extra_parts":     "Extra Parts",
+    "non_conformant":  "Non-Conformant",
 }
 
 DIMENSION_LABELS = {
-    "broken_lines":    "QL — Line Quality",
     "too_thick":       "QL — Line Quality",
+    "broken_lines":    "QL — Line Quality",
     "missing_texture": "QT — Texture",
     "missing_parts":   "QP — Part Completeness",
+    "extra_parts":     "QE — Extra/Hallucinated Content",
+    "non_conformant":  "QN — Overall Conformance",
 }
 
 QUESTIONS = {
@@ -36,6 +51,18 @@ QUESTIONS = {
         "Does this tactile graphic omit any anatomical or structural parts "
         "that are clearly present in the reference photograph?"
     ),
+    "extra_parts": (
+        "Comparing this tactile graphic to the reference photograph, does the "
+        "tactile drawing contain invented structures, hallucinated appendages, "
+        "or decorative additions that are not present in the reference?"
+    ),
+    "non_conformant": (
+        "Comparing this tactile graphic to the reference photograph, does the "
+        "tactile graphic fail to match the overall concept, subject type, or "
+        "identity shown in the photograph — for example by depicting a "
+        "fundamentally different object, species, or scene rather than a "
+        "tactile rendering of the photographed subject?"
+    ),
 }
 
 EDIT_INSTRUCTIONS = {
@@ -55,6 +82,14 @@ EDIT_INSTRUCTIONS = {
         "Restore missing parts: regenerate or edit to include all anatomical "
         "and structural elements visible in the reference photograph."
     ),
+    "extra_parts": (
+        "Remove hallucinated content: the tactile contains elements not present "
+        "in the reference image. Regenerate keeping only the actual subject."
+    ),
+    "non_conformant": (
+        "The overall tactile does not match the reference concept. "
+        "Regenerate from scratch using the original BANA prompt — do not edit."
+    ),
 }
 
 SYSTEM_PROMPT = (
@@ -65,55 +100,68 @@ SYSTEM_PROMPT = (
     "Answer the quality assessment question with 'yes' or 'no' only."
 )
 
-# ---------------------------------------------------------------------------
-# Decision thresholds — two modes, both reported in the June 12 status report
-#
-#   balanced   : fixed t = 0.50 for every option (same convention as
-#                eval_baselines.py "balanced" metrics)
-#   calibrated : val-calibrated F1-max thresholds (June 11 retraining)
-#
-# Note: the VLM calibrated thresholds for missing_parts / missing_texture are
-# 0.05, which flags almost any candidate. Balanced mode is the default in the
-# pipeline UI so the all-clear state is reachable; the user can switch modes.
-# ---------------------------------------------------------------------------
+# ── Threshold configuration ────────────────────────────────────────────────────
+# Two modes available in the UI:
+#   balanced   — fixed t = 0.50 for every option (all-clear state reachable)
+#   calibrated — per-option val-F1-maximising thresholds (June 2026 retraining)
 
 THRESHOLD_MODES = ["balanced", "calibrated"]
 DEFAULT_THRESHOLD_MODE = "balanced"
 
 BALANCED_THRESHOLDS = {opt: 0.50 for opt in ALL_OPTIONS}
 
-# Val-calibrated thresholds — CLIP Probe (retrained June 11, 2026)
+# Val-calibrated thresholds — CLIP Probe v2 (5-head, retrained June 2026)
 CLIP_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.85,
-    "broken_lines":    0.35,
-    "missing_parts":   0.70,
-    "missing_texture": 0.55,
+    "too_thick":       0.60,
+    "broken_lines":    0.20,
+    "missing_parts":   0.50,
+    "missing_texture": 0.50,
+    "extra_parts":     0.50,
+    "non_conformant":  0.60,
 }
 
-# Val-calibrated thresholds — VLM Fine-tuned epoch 7 (retrained June 11, 2026)
+# Val-calibrated thresholds — VLM Fine-tuned v2 (Qwen2-VL-2B, epoch 4)
 VLM_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.80,
-    "broken_lines":    0.30,
-    "missing_parts":   0.05,
-    "missing_texture": 0.05,
+    "too_thick":       0.15,
+    "broken_lines":    0.10,
+    "missing_parts":   0.15,
+    "missing_texture": 0.10,
+    "extra_parts":     0.20,
+    "non_conformant":  0.05,
 }
 
-# Backwards-compatible aliases (calibrated was the only mode before June 11)
+# Val-calibrated thresholds — ResNet-50 v2 (retrained June 2026)
+RESNET_THRESHOLDS_CALIBRATED = {
+    "too_thick":       0.20,
+    "broken_lines":    0.15,
+    "missing_parts":   0.35,
+    "missing_texture": 0.30,
+    "extra_parts":     0.45,
+    "non_conformant":  0.50,
+}
+
+# Val-calibrated thresholds — ViT-B/16 v2 (retrained June 2026)
+VIT_THRESHOLDS_CALIBRATED = {
+    "too_thick":       0.05,
+    "broken_lines":    0.10,
+    "missing_parts":   0.40,
+    "missing_texture": 0.10,
+    "extra_parts":     0.85,
+    "non_conformant":  0.50,
+}
+
+# Backward-compatible aliases
 CLIP_THRESHOLDS = CLIP_THRESHOLDS_CALIBRATED
-VLM_THRESHOLDS = VLM_THRESHOLDS_CALIBRATED
+VLM_THRESHOLDS  = VLM_THRESHOLDS_CALIBRATED
 
 
 def build_result(probs: dict[str, float], calibrated: dict[str, float],
                  mode: str = DEFAULT_THRESHOLD_MODE) -> dict:
-    """Apply a threshold mode to raw per-option probabilities.
-
-    Works on stored probabilities, so the UI can switch modes without
-    re-running inference.
-    """
+    """Apply a threshold mode to raw per-option probabilities."""
     thresholds = BALANCED_THRESHOLDS if mode == "balanced" else calibrated
     per_option: dict = {}
     for opt in ALL_OPTIONS:
-        prob   = probs[opt]
+        prob   = probs.get(opt, 0.0)
         thresh = thresholds.get(opt, 0.5)
         flag   = prob > thresh
         per_option[opt] = {
