@@ -33,3 +33,10 @@ output/
 # Editor
 .claude/
 .gradio/
+
+# Local project planning notes (not for public repo)
+project_notes/
+
+# Generated training pairs (local data — images + annotations)
+generated_training_data/
+

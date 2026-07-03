@@ -1,7 +1,7 @@
 # TactileExpert
 
 Human-in-the-loop pipeline for generating and evaluating tactile graphics
-using GPT-image-1 and four BANA-grounded quality evaluators.
+using GPT-image-1 and five BANA-grounded quality evaluators.
 
 ![Pipeline](pipeline_diagram.png)
 
@@ -9,7 +9,7 @@ using GPT-image-1 and four BANA-grounded quality evaluators.
 
 TactileExpert takes a natural reference photograph and produces a high-quality
 tactile graphic through iterative AI generation and multi-model evaluation.
-Four evaluators score each candidate against six BANA quality dimensions,
+Five evaluators score each candidate against five BANA quality dimensions,
 giving the user actionable feedback on what to fix before the next iteration.
 
 ## Pipeline
@@ -42,7 +42,7 @@ API key is entered in the UI for each call and is never stored.
 | **Balanced** (default) | Fixed t = 0.50 for all options — all-clear state is reachable |
 | **Calibrated** | Per-option val-F1-maximising thresholds (see table below) |
 
-## Defect Dimensions (6 options)
+## Defect Dimensions (5 options)
 
 | # | Option | Supervisor label | Description |
 |---|---|---|---|
@@ -51,45 +51,43 @@ API key is entered in the UI for each call and is never stored.
 | 3 | Missing Parts | QP — Part Completeness | A structural part visible in the natural image is absent |
 | 4 | Missing Texture | QT — Texture | Surface texture of the object is missing or insufficient |
 | 5 | Extra Parts | QE — Extra/Hallucinated Content | Tactile contains elements not in the natural image |
-| 6 | Non-Conformant | QN — Overall Conformance Issue | Tactile does not match the reference image concept overall |
 
 All options: **1 = defect present**, 0 = not present.
 
-## Evaluation Results (June 2026)
+## Evaluation Results
 
-All models retrained on a manually-annotated dataset of **987 natural–tactile
-image pairs** (full dataset, human-verified, 6 options).  Evaluated on a
-held-out test set of **153 pairs** with thresholds calibrated on the val split.
+All models trained on a manually-annotated dataset of **987 natural–tactile
+image pairs** (human-verified, 5 options) + **30 GPT-generated pairs**.
+Evaluated on a held-out test set of **153 pairs** with thresholds calibrated on val.
 
 ### F1 Score (balanced threshold t = 0.50)
 
-| Option | CLIP Probe | VLM (Qwen2-VL) | ResNet-50 | ViT-B/16 |
-|---|:---:|:---:|:---:|:---:|
-| Too Thick | 0.581 | 0.553 | 0.500 | 0.613 |
-| Broken Lines | 0.605 | **0.647** | 0.457 | 0.552 |
-| Missing Parts | 0.659 | **0.662** | 0.700 | 0.595 |
-| Missing Texture | 0.888 | **0.904** | 0.839 | 0.849 |
-| Extra Parts | 0.405 | **0.458** | 0.368 | 0.286 |
-| Non-Conformant | 0.270 | **0.579** | 0.286 | 0.174 |
-| **Macro F1** | 0.568 | **0.634** | 0.525 | 0.511 |
+| Option | CLIP Probe | VLM (Qwen2-VL) | ResNet-50 | ViT-B/16 | **DINOv2 Probe** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Too Thick | 0.581 | 0.553 | 0.500 | 0.613 | **0.667** |
+| Broken Lines | 0.605 | **0.647** | 0.457 | 0.552 | 0.585 |
+| Missing Parts | 0.659 | 0.662 | **0.700** | 0.595 | 0.714 |
+| Missing Texture | 0.888 | **0.904** | 0.839 | 0.849 | 0.881 |
+| Extra Parts | 0.405 | **0.458** | 0.368 | 0.286 | 0.323 |
+| **Macro F1** | 0.628 | **0.645** | 0.573 | 0.579 | 0.634 |
 
 ### AUC (threshold-independent)
 
-| Option | CLIP Probe | VLM (Qwen2-VL) | ResNet-50 | ViT-B/16 |
-|---|:---:|:---:|:---:|:---:|
-| Too Thick | 0.800 | 0.833 | 0.788 | **0.852** |
-| Broken Lines | **0.761** | 0.782 | 0.664 | 0.714 |
-| Missing Parts | 0.736 | 0.735 | **0.761** | 0.727 |
-| Missing Texture | 0.817 | **0.844** | 0.722 | 0.766 |
-| Extra Parts | **0.725** | 0.683 | 0.755 | 0.622 |
-| Non-Conformant | 0.717 | **0.767** | 0.731 | 0.491 |
-| **Macro AUC** | 0.759 | **0.774** | 0.737 | 0.695 |
+| Option | CLIP Probe | VLM (Qwen2-VL) | ResNet-50 | ViT-B/16 | **DINOv2 Probe** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Too Thick | 0.800 | 0.833 | 0.788 | 0.852 | **0.838** |
+| Broken Lines | **0.761** | 0.782 | 0.664 | 0.714 | 0.723 |
+| Missing Parts | 0.736 | 0.735 | 0.761 | 0.727 | **0.755** |
+| Missing Texture | 0.817 | **0.844** | 0.722 | 0.766 | 0.736 |
+| Extra Parts | 0.725 | 0.683 | **0.755** | 0.622 | 0.682 |
+| **Macro AUC** | **0.768** | 0.775 | 0.738 | 0.736 | 0.747 |
 
 **Key findings:**
-- VLM leads on overall macro F1 (0.634) and macro AUC (0.774)
-- VLM is markedly stronger on Non-Conformant (F1 0.579 vs 0.270 for CLIP) — the semantic/holistic judgment favours the language-guided model
-- ViT-B/16 achieves the best AUC on Too Thick (0.852) — patch attention captures fine line geometry well
-- Calibrated val-F1-max thresholds improve all models; see `evaluators/constants.py` for per-model values
+- VLM leads on macro F1 (0.645) and macro AUC (0.775)
+- **DINOv2 Probe leads on Too Thick (F1 0.667, AUC 0.838)** — self-supervised structural features outperform language-aligned CLIP on line geometry
+- DINOv2 matches CLIP on macro F1 (0.634 vs 0.628) without any language supervision
+- ViT-B/16 achieves best AUC on Too Thick (0.852) among the original four models
+- Calibrated val-F1-max thresholds improve all models; see `evaluators/constants.py`
 
 ## Dataset
 
@@ -112,20 +110,21 @@ held-out test set of **153 pairs** with thresholds calibrated on the val split.
 TactileExpert/
 ├── evaluators/
 │   ├── constants.py          options, prompts, all threshold sets, build_result()
-│   ├── clip_probe_eval.py    CLIP ViT-L/14 + 5 MLP heads (QL/QP/QT/QE/QN)
+│   ├── clip_probe_eval.py    CLIP ViT-L/14 + 4 MLP heads (QL/QP/QT/QE)
 │   ├── backbone_eval.py      ResNet-50 and ViT-B/16 two-stream evaluators
-│   └── vlm_eval.py           Qwen2-VL-2B-Instruct + LoRA adapter
+│   ├── vlm_eval.py           Qwen2-VL-2B-Instruct + LoRA adapter
+│   └── dino_probe_eval.py    DINOv2 ViT-L/14 (frozen) + 4 MLP heads
 ├── generation/
 │   └── gpt_generator.py      GPT-image-1 generate + edit wrappers
 ├── models/                   checkpoints — not tracked in git (see setup)
-│   ├── clip_probe/           ql/qp/qt/qe/qn_evaluator.pt
+│   ├── clip_probe/           ql/qp/qt/qe_evaluator.pt
 │   ├── vlm_checkpoint/       LoRA adapter + tokenizer files
 │   ├── resnet50/             resnet50_evaluator.pt
-│   └── vit_b16/              vit_b_16_evaluator.pt
-├── generated_training_data/  pairs saved via "Save to Training" UI button
+│   ├── vit_b16/              vit_b_16_evaluator.pt
+│   └── dino_probe/           ql/qp/qt/qe_evaluator.pt
 ├── app.py                    Gradio pipeline interface
 ├── run_local.sh              CPU-only launch (login node / testing)
-├── slurm/run_pipeline.sh     SLURM job script (GPU, 4 h)
+├── slurm/run_pipeline.sh     SLURM job script (GPU, 8 h)
 └── requirements.txt
 ```
 
@@ -135,11 +134,11 @@ TactileExpert/
 pip install -r requirements.txt
 ```
 
-Model checkpoints are not tracked in git (binary files, ~80 MB total).
+Model checkpoints are not tracked in git (binary files, ~100 MB total).
 Copy from the research directory on Nibi:
 
 ```bash
-# CLIP Probe (5 heads)
+# CLIP Probe (4 heads)
 cp ~/vlm_finetune/TactileEval_Context_And_Data/models/clip_probe_v2/*.pt models/clip_probe/
 
 # VLM LoRA adapter
@@ -150,6 +149,9 @@ cp ~/vlm_finetune/TactileEval_Context_And_Data/models/resnet50_v2/resnet50_evalu
 
 # ViT-B/16
 cp ~/vlm_finetune/TactileEval_Context_And_Data/models/vitb16_v2/vit_b_16_evaluator.pt models/vit_b16/
+
+# DINOv2 Probe (4 heads — DINOv2 ViT-L/14 weights downloaded automatically via torch.hub)
+cp ~/vlm_finetune/TactileEval_Context_And_Data/models/dino_probe_v2/{ql,qp,qt,qe}_evaluator.pt models/dino_probe/
 ```
 
 The VLM requires `Qwen/Qwen2-VL-2B-Instruct` from HuggingFace (loaded at runtime

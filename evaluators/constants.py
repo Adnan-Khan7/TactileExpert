@@ -10,7 +10,6 @@ ALL_OPTIONS = [
     "missing_parts",
     "missing_texture",
     "extra_parts",
-    "non_conformant",
 ]
 
 OPTION_DISPLAY = {
@@ -19,7 +18,6 @@ OPTION_DISPLAY = {
     "missing_parts":   "Missing Parts",
     "missing_texture": "Missing Texture",
     "extra_parts":     "Extra Parts",
-    "non_conformant":  "Non-Conformant",
 }
 
 DIMENSION_LABELS = {
@@ -28,8 +26,9 @@ DIMENSION_LABELS = {
     "missing_texture": "QT — Texture",
     "missing_parts":   "QP — Part Completeness",
     "extra_parts":     "QE — Extra/Hallucinated Content",
-    "non_conformant":  "QN — Overall Conformance",
 }
+
+# non_conformant removed per advisor feedback — too subjective, confuses models.
 
 QUESTIONS = {
     "broken_lines": (
@@ -56,13 +55,6 @@ QUESTIONS = {
         "tactile drawing contain invented structures, hallucinated appendages, "
         "or decorative additions that are not present in the reference?"
     ),
-    "non_conformant": (
-        "Comparing this tactile graphic to the reference photograph, does the "
-        "tactile graphic fail to match the overall concept, subject type, or "
-        "identity shown in the photograph — for example by depicting a "
-        "fundamentally different object, species, or scene rather than a "
-        "tactile rendering of the photographed subject?"
-    ),
 }
 
 EDIT_INSTRUCTIONS = {
@@ -85,10 +77,6 @@ EDIT_INSTRUCTIONS = {
     "extra_parts": (
         "Remove hallucinated content: the tactile contains elements not present "
         "in the reference image. Regenerate keeping only the actual subject."
-    ),
-    "non_conformant": (
-        "The overall tactile does not match the reference concept. "
-        "Regenerate from scratch using the original BANA prompt — do not edit."
     ),
 }
 
@@ -117,7 +105,6 @@ CLIP_THRESHOLDS_CALIBRATED = {
     "missing_parts":   0.50,
     "missing_texture": 0.50,
     "extra_parts":     0.50,
-    "non_conformant":  0.60,
 }
 
 # Val-calibrated thresholds — VLM Fine-tuned v2 (Qwen2-VL-2B, epoch 4)
@@ -127,7 +114,6 @@ VLM_THRESHOLDS_CALIBRATED = {
     "missing_parts":   0.15,
     "missing_texture": 0.10,
     "extra_parts":     0.20,
-    "non_conformant":  0.05,
 }
 
 # Val-calibrated thresholds — ResNet-50 v2 (retrained June 2026)
@@ -137,7 +123,6 @@ RESNET_THRESHOLDS_CALIBRATED = {
     "missing_parts":   0.35,
     "missing_texture": 0.30,
     "extra_parts":     0.45,
-    "non_conformant":  0.50,
 }
 
 # Val-calibrated thresholds — ViT-B/16 v2 (retrained June 2026)
@@ -147,7 +132,15 @@ VIT_THRESHOLDS_CALIBRATED = {
     "missing_parts":   0.40,
     "missing_texture": 0.10,
     "extra_parts":     0.85,
-    "non_conformant":  0.50,
+}
+
+# Val-calibrated thresholds — DINOv2 ViT-L/14 probe (retrained July 2026, gamma_neg=8 for QT)
+DINO_THRESHOLDS_CALIBRATED = {
+    "too_thick":       0.55,
+    "broken_lines":    0.60,
+    "missing_parts":   0.50,
+    "missing_texture": 0.50,
+    "extra_parts":     0.55,
 }
 
 # Backward-compatible aliases

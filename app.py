@@ -30,7 +30,8 @@ from pathlib import Path
 import gradio as gr
 from PIL import Image
 
-from evaluators import CLIPProbeEvaluator, VLMEvaluator, ResNetEvaluator, ViTEvaluator
+from evaluators import (CLIPProbeEvaluator, VLMEvaluator,
+                        ResNetEvaluator, ViTEvaluator, DINOProbeEvaluator)
 from evaluators.constants import (
     ALL_OPTIONS, OPTION_DISPLAY, DEFAULT_THRESHOLD_MODE,
     EDIT_INSTRUCTIONS, build_result,
@@ -42,13 +43,14 @@ from generation.gpt_generator import (
 HERE      = Path(__file__).resolve().parent
 TRAIN_DIR = HERE / "generated_training_data"
 
-AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16"]
+AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16", "DINOv2 Probe"]
 
 MODEL_COLOR = {
     "CLIP Probe":     "#e67e22",
     "VLM Fine-tuned": "#3498db",
     "ResNet-50":      "#8e44ad",
     "ViT-B/16":       "#27ae60",
+    "DINOv2 Probe":   "#c0392b",
 }
 
 MODE_LABELS = {
@@ -64,6 +66,7 @@ _MODEL_KEYS = {
     "VLM Fine-tuned": ("vlm_probs",    "vlm_cal"),
     "ResNet-50":      ("resnet_probs", "resnet_cal"),
     "ViT-B/16":       ("vit_probs",    "vit_cal"),
+    "DINOv2 Probe":   ("dino_probs",   "dino_cal"),
 }
 
 
@@ -98,8 +101,14 @@ def _consensus_badge(flagged_by: list[str], total_models: int) -> str:
                "padding:1px 6px;font-size:11px'>ALL CLEAR</span>"
     if n == total_models:
         return "<span style='background:#c0392b;color:#fff;border-radius:3px;" \
-               "padding:1px 6px;font-size:11px'>BOTH FLAG</span>"
-    model_short = {"CLIP Probe": "CLIP", "VLM Fine-tuned": "VLM"}
+               "padding:1px 6px;font-size:11px'>ALL FLAG</span>"
+    model_short = {
+        "CLIP Probe":     "CLIP",
+        "VLM Fine-tuned": "VLM",
+        "ResNet-50":      "ResNet",
+        "ViT-B/16":       "ViT",
+        "DINOv2 Probe":   "DINO",
+    }
     who = " + ".join(model_short.get(m, m) for m in flagged_by)
     return (f"<span style='background:#e67e22;color:#fff;border-radius:3px;"
             f"padding:1px 6px;font-size:11px'>{who} only</span>")
@@ -327,6 +336,11 @@ def main():
             _cache["vit"] = ViTEvaluator()
         return _cache["vit"]
 
+    def _dino():
+        if "dino" not in _cache:
+            _cache["dino"] = DINOProbeEvaluator()
+        return _cache["dino"]
+
     print("[TactileExpert] Loading CLIP Probe (needed for object detection)…")
     _clip()
     print("[TactileExpert] Ready — starting UI.")
@@ -353,6 +367,9 @@ def main():
         if "ViT-B/16" in selected:
             out["vit_probs"] = _vit().score_pair(nat_path, tac_path)
             out["vit_cal"]   = dict(_vit().calibrated_thresholds)
+        if "DINOv2 Probe" in selected:
+            out["dino_probs"] = _dino().score_pair(nat_path, tac_path)
+            out["dino_cal"]   = dict(_dino().calibrated_thresholds)
         return out
 
     def _store_iteration(label, tac_pil, nat_pil, nat_path, tac_path,
@@ -374,6 +391,8 @@ def main():
             "resnet_cal":   eval_data.get("resnet_cal",   {}),
             "vit_probs":    eval_data.get("vit_probs",    {}),
             "vit_cal":      eval_data.get("vit_cal",      {}),
+            "dino_probs":   eval_data.get("dino_probs",   {}),
+            "dino_cal":     eval_data.get("dino_cal",     {}),
         }
         _state.append(it)
         return it
@@ -387,7 +406,7 @@ def main():
             items.append((it["pil"], it["label"]))
         return items
 
-    def _render(mode_lbl: str, selected: list[str]):
+    def _render(mode_lbl: str, selected: list[str], trusted: str = ""):
         mode = _mode(mode_lbl)
         if not _state:
             return (
@@ -406,12 +425,24 @@ def main():
 
         all_clear = all(r["all_clear"] for r in mr.values()) if mr else False
 
-        # Edit instruction prefill from first flagged model
+        # Bug fix 1a + 1b: use trusted model, combine ALL flagged issues
         prefill = ""
-        for m in selected:
-            if m in mr and mr[m]["top_issue"]:
-                prefill = mr[m]["top_issue"]["edit_instruction"] or ""
-                break
+        # Resolve which model to pull instructions from
+        trusted_model = trusted if trusted in mr else (
+            next((m for m in selected if m in mr), None))
+        if trusted_model and mr.get(trusted_model):
+            flagged_opts = mr[trusted_model]["flagged"]
+            instructions = [
+                mr[trusted_model]["options"][opt]["edit_instruction"]
+                for opt in flagged_opts
+                if mr[trusted_model]["options"][opt].get("edit_instruction")
+            ]
+            if instructions:
+                if len(instructions) == 1:
+                    prefill = instructions[0]
+                else:
+                    prefill = " ".join(
+                        f"{i+1}. {inst}" for i, inst in enumerate(instructions))
 
         return (
             _eval_table(mr, mode),
@@ -426,7 +457,7 @@ def main():
     # ── Callbacks ──────────────────────────────────────────────────────────────
 
     def on_generate(nat_pil, object_desc, prompt_text, api_key,
-                    mode_lbl, selected_models):
+                    mode_lbl, selected_models, trusted_model):
         if nat_pil is None:
             return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
         if not api_key.strip():
@@ -438,7 +469,8 @@ def main():
         nat_pil.save(nat_tmp.name, format="JPEG")
 
         try:
-            tac_pil = generate_tactile(api_key=api_key.strip(), prompt=prompt)
+            tac_pil = generate_tactile(api_key=api_key.strip(), prompt=prompt,
+                                       natural_reference=nat_pil)
         except Exception as e:
             return (gr.update(),) * 7 + (_api_error("Generation", e),)
 
@@ -450,10 +482,10 @@ def main():
                          nat_tmp.name, tac_tmp.name, eval_data,
                          instruction=f"[generated] {prompt[:80]}")
 
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
 
-    def on_eval_upload(nat_pil, tac_pil, mode_lbl, selected_models):
+    def on_eval_upload(nat_pil, tac_pil, mode_lbl, selected_models, trusted_model):
         if nat_pil is None:
             return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
         if tac_pil is None:
@@ -468,19 +500,19 @@ def main():
         _store_iteration(f"Iter {len(_state)}", tac_pil.convert("RGB"), nat_pil,
                          nat_tmp.name, tac_tmp.name, eval_data)
 
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
 
     def on_edit(edit_text, api_key, include_nat, use_context,
-                mode_lbl, selected_models):
+                mode_lbl, selected_models, trusted_model):
         if not _state:
-            return (gr.update(),) * 6 + ("⚠ Generate first.",)
+            return (gr.update(),) * 7 + ("⚠ Generate first.",)
         if not api_key.strip():
-            return (gr.update(),) * 6 + ("⚠ API key required.",)
+            return (gr.update(),) * 7 + ("⚠ API key required.",)
 
         instruction = edit_text.strip()
         if not instruction:
-            return (gr.update(),) * 6 + ("⚠ Provide an edit instruction.",)
+            return (gr.update(),) * 7 + ("⚠ Provide an edit instruction.",)
 
         # Inject accumulated context
         full_instruction = instruction
@@ -497,7 +529,7 @@ def main():
                 natural_reference=last["nat_pil"] if include_nat else None,
             )
         except Exception as e:
-            return (gr.update(),) * 6 + (_api_error("Edit", e),)
+            return (gr.update(),) * 7 + (_api_error("Edit", e),)
 
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         new_tac.save(tac_tmp.name, format="JPEG")
@@ -510,11 +542,11 @@ def main():
         # Append to edit log (user-visible instruction, not the context-prefixed one)
         _edit_history.append({"label": f"Iter {len(_state)-1}", "instruction": instruction})
 
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return new_tac, tbl, clear, strip, log, gallery, prefill, ""
 
-    def on_view_change(mode_lbl, selected_models):
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models)
+    def on_view_change(mode_lbl, selected_models, trusted_model):
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return tbl, clear, strip, log, gallery, prefill
 
     def on_save_to_train(label_selections: list, mode_lbl: str, selected_models: list):
@@ -748,13 +780,13 @@ def main():
         gen_btn.click(
             fn=on_generate,
             inputs=[nat_img, object_desc, prompt_box, api_key,
-                    mode_radio, model_select],
+                    mode_radio, model_select, trusted_radio],
             outputs=_gen_outputs,
         )
 
         eval_btn.click(
             fn=on_eval_upload,
-            inputs=[nat_img, tac_upload, mode_radio, model_select],
+            inputs=[nat_img, tac_upload, mode_radio, model_select, trusted_radio],
             outputs=_gen_outputs,
         )
 
@@ -764,7 +796,7 @@ def main():
         edit_btn.click(
             fn=on_edit,
             inputs=[edit_box, api_key, include_nat_cb, use_context_cb,
-                    mode_radio, model_select],
+                    mode_radio, model_select, trusted_radio],
             outputs=_edit_outputs,
         )
 
@@ -774,7 +806,7 @@ def main():
         for ctrl in (mode_radio, model_select, trusted_radio):
             ctrl.change(
                 fn=on_view_change,
-                inputs=[mode_radio, model_select],
+                inputs=[mode_radio, model_select, trusted_radio],
                 outputs=_view_outputs,
             )
 

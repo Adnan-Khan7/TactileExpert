@@ -71,7 +71,7 @@ class CLIPProbeEvaluator:
         for _dim, pt_name, options in self._HEAD_CONFIGS:
             ckpt = torch.load(models_dir / pt_name, map_location=self.device, weights_only=False)
             head = nn.Sequential(
-                nn.Linear(ckpt["input_dim"], ckpt["hidden_dim"]),
+                nn.Linear(ckpt.get("input_dim", 768 * 3), ckpt["hidden_dim"]),
                 nn.BatchNorm1d(ckpt["hidden_dim"]),
                 nn.ReLU(),
                 nn.Dropout(0.3),
