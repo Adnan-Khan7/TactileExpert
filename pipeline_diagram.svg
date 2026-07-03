@@ -1,0 +1,267 @@
+<svg width="760" height="870" viewBox="0 0 760 870"
+     xmlns="http://www.w3.org/2000/svg"
+     font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif">
+<defs>
+  <filter id="sh" x="-8%" y="-8%" width="120%" height="130%">
+    <feDropShadow dx="0" dy="2" stdDeviation="3.5"
+                  flood-color="#1C2438" flood-opacity="0.07"/>
+  </filter>
+  <!-- Main flow arrowhead (blue) -->
+  <marker id="ab" markerWidth="9" markerHeight="7"
+          refX="9" refY="3.5" orient="auto">
+    <polygon points="0 0,9 3.5,0 7" fill="#2550A7"/>
+  </marker>
+  <!-- Loop arrowhead (red) -->
+  <marker id="ar" markerWidth="9" markerHeight="7"
+          refX="9" refY="3.5" orient="auto">
+    <polygon points="0 0,9 3.5,0 7" fill="#C63D25"/>
+  </marker>
+  <!-- Branch arrowhead (dark) -->
+  <marker id="ad" markerWidth="9" markerHeight="7"
+          refX="9" refY="3.5" orient="auto">
+    <polygon points="0 0,9 3.5,0 7" fill="#1C2438"/>
+  </marker>
+</defs>
+
+<!-- ────────── Background ────────── -->
+<rect width="760" height="870" fill="#F4F6FC"/>
+
+<!-- ══════════════════════════════════════════════════════
+     STEP 1 — UPLOAD
+══════════════════════════════════════════════════════ -->
+<g filter="url(#sh)">
+  <rect x="70" y="56" width="620" height="75" rx="6"
+        fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1.2"/>
+  <!-- Blue accent stripe -->
+  <rect x="70" y="56" width="5" height="75" rx="2.5" fill="#2550A7"/>
+</g>
+<text x="97" y="85" font-size="11.5" font-weight="700"
+      fill="#2550A7" letter-spacing="0.1em">UPLOAD</text>
+<text x="97" y="104" font-size="14" font-weight="600" fill="#1C2438">
+  Natural Reference Photo
+</text>
+<text x="97" y="121" font-size="11.5" fill="#7A8AAA">
+  CLIP zero-shot classifies the object and pre-fills the name field (~10 ms)
+</text>
+
+<!-- Arrow 1 → 2 -->
+<line x1="380" y1="131" x2="380" y2="178"
+      stroke="#2550A7" stroke-width="2" marker-end="url(#ab)"/>
+
+<!-- ══════════════════════════════════════════════════════
+     STEP 2 — GENERATE
+══════════════════════════════════════════════════════ -->
+<g filter="url(#sh)">
+  <rect x="70" y="183" width="620" height="90" rx="6"
+        fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1.2"/>
+  <!-- Green accent stripe -->
+  <rect x="70" y="183" width="5" height="90" rx="2.5" fill="#1B7A50"/>
+</g>
+<text x="97" y="210" font-size="11.5" font-weight="700"
+      fill="#1B7A50" letter-spacing="0.1em">GENERATE</text>
+<text x="97" y="229" font-size="14" font-weight="600" fill="#1C2438">
+  GPT-image-1 Tactile Graphic Generation
+</text>
+<text x="97" y="247" font-size="11.5" fill="#7A8AAA">
+  Reference photograph sent directly to API · BANA-grounded prompt guides style
+</text>
+<text x="97" y="263" font-size="11.5" fill="#7A8AAA">
+  White background · no cropping · subject-only rendering
+</text>
+
+<!-- Arrow 2 → 3 -->
+<line x1="380" y1="273" x2="380" y2="318"
+      stroke="#2550A7" stroke-width="2" marker-end="url(#ab)"/>
+
+<!-- ══════════════════════════════════════════════════════
+     STEP 3 — TACTILE GRAPHIC (intermediate)
+══════════════════════════════════════════════════════ -->
+<g filter="url(#sh)">
+  <rect x="70" y="323" width="620" height="68" rx="6"
+        fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1.2"/>
+  <!-- Slate accent stripe -->
+  <rect x="70" y="323" width="5" height="68" rx="2.5" fill="#7A8AAA"/>
+</g>
+<text x="97" y="349" font-size="11.5" font-weight="700"
+      fill="#7A8AAA" letter-spacing="0.1em">CANDIDATE</text>
+<text x="97" y="368" font-size="14" font-weight="600" fill="#1C2438">
+  Tactile Graphic
+</text>
+<text x="97" y="383" font-size="11.5" fill="#7A8AAA">
+  Embossed line-art candidate ready for quality evaluation
+</text>
+
+<!-- Arrow 3 → EVALUATE -->
+<line x1="380" y1="391" x2="380" y2="436"
+      stroke="#2550A7" stroke-width="2" marker-end="url(#ab)"/>
+
+<!-- ══════════════════════════════════════════════════════
+     STEP 4 — EVALUATE (cluster)
+══════════════════════════════════════════════════════ -->
+<g filter="url(#sh)">
+  <rect x="45" y="441" width="670" height="210" rx="8"
+        fill="#EEF0F9" stroke="#4A3890" stroke-width="1.4"/>
+</g>
+
+<!-- Evaluate header -->
+<text x="70" y="469" font-size="11.5" font-weight="700"
+      fill="#4A3890" letter-spacing="0.1em">EVALUATE</text>
+<text x="70" y="488" font-size="14" font-weight="600" fill="#1C2438">
+  Multi-Model Quality Assessment
+</text>
+
+<!-- 5 Model chips — evenly spaced across cluster -->
+<!-- Cluster inner x: 70 to 695, width=625 -->
+<!-- 5 chips, w=108, gap=13: total=5*108+4*13=592, margin=(625-592)/2=16.5 → start at 70+17=87 -->
+<!-- Chip left edges: 87, 208, 329, 450, 571 -->
+
+<!-- CLIP Probe chip -->
+<rect x="87" y="505" width="108" height="34" rx="5"
+      fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1"/>
+<text x="141" y="525" font-size="11" font-weight="600" fill="#2550A7"
+      text-anchor="middle">CLIP Probe</text>
+<text x="141" y="538" font-size="9.5" fill="#7A8AAA"
+      text-anchor="middle">ViT-L/14 + MLP</text>
+
+<!-- VLM chip -->
+<rect x="208" y="505" width="108" height="34" rx="5"
+      fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1"/>
+<text x="262" y="525" font-size="11" font-weight="600" fill="#2550A7"
+      text-anchor="middle">VLM</text>
+<text x="262" y="538" font-size="9.5" fill="#7A8AAA"
+      text-anchor="middle">Qwen2-VL + LoRA</text>
+
+<!-- ResNet chip -->
+<rect x="329" y="505" width="108" height="34" rx="5"
+      fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1"/>
+<text x="383" y="525" font-size="11" font-weight="600" fill="#2550A7"
+      text-anchor="middle">ResNet-50</text>
+<text x="383" y="538" font-size="9.5" fill="#7A8AAA"
+      text-anchor="middle">Two-stream CNN</text>
+
+<!-- ViT chip -->
+<rect x="450" y="505" width="108" height="34" rx="5"
+      fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1"/>
+<text x="504" y="525" font-size="11" font-weight="600" fill="#2550A7"
+      text-anchor="middle">ViT-B/16</text>
+<text x="504" y="538" font-size="9.5" fill="#7A8AAA"
+      text-anchor="middle">Two-stream ViT</text>
+
+<!-- DINOv2 chip -->
+<rect x="571" y="505" width="108" height="34" rx="5"
+      fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1"/>
+<text x="625" y="525" font-size="11" font-weight="600" fill="#2550A7"
+      text-anchor="middle">DINOv2</text>
+<text x="625" y="538" font-size="9.5" fill="#7A8AAA"
+      text-anchor="middle">ViT-L/14 Probe</text>
+
+<!-- Defect dimension row -->
+<text x="380" y="573" font-size="10.5" fill="#4A3890"
+      font-weight="600" text-anchor="middle" letter-spacing="0.03em">
+  DEFECT DIMENSIONS
+</text>
+
+<!-- 5 dimension pills -->
+<!-- 5 pills, w=106, gap=9: total=5*106+4*9=566, start=(760-566)/2=97, but within cluster so center at 380 -->
+<!-- Pill left edges: 380-566/2=380-283=97 → 97,212,327,442,557 -->
+
+<rect x="87"  y="582" width="106" height="22" rx="11" fill="#DDE2F4"/>
+<text x="140" y="597" font-size="10" fill="#2550A7" font-weight="600"
+      text-anchor="middle">Too Thick</text>
+
+<rect x="202" y="582" width="106" height="22" rx="11" fill="#DDE2F4"/>
+<text x="255" y="597" font-size="10" fill="#2550A7" font-weight="600"
+      text-anchor="middle">Broken Lines</text>
+
+<rect x="317" y="582" width="106" height="22" rx="11" fill="#DDE2F4"/>
+<text x="370" y="597" font-size="10" fill="#2550A7" font-weight="600"
+      text-anchor="middle">Missing Parts</text>
+
+<rect x="432" y="582" width="120" height="22" rx="11" fill="#DDE2F4"/>
+<text x="492" y="597" font-size="10" fill="#2550A7" font-weight="600"
+      text-anchor="middle">Missing Texture</text>
+
+<rect x="561" y="582" width="106" height="22" rx="11" fill="#DDE2F4"/>
+<text x="614" y="597" font-size="10" fill="#2550A7" font-weight="600"
+      text-anchor="middle">Extra Parts</text>
+
+<!-- Threshold note -->
+<text x="380" y="638" font-size="10" fill="#7A8AAA"
+      text-anchor="middle">
+  Scores shown as probability bars · balanced (t = 0.50) or calibrated val-F1-max thresholds
+</text>
+
+<!-- Arrow EVALUATE → Decision -->
+<line x1="380" y1="651" x2="380" y2="696"
+      stroke="#2550A7" stroke-width="2" marker-end="url(#ab)"/>
+
+<!-- ══════════════════════════════════════════════════════
+     DECISION DIAMOND
+══════════════════════════════════════════════════════ -->
+<polygon points="380,700 432,730 380,760 328,730"
+         fill="#FFFFFF" stroke="#1C2438" stroke-width="1.6"/>
+<text x="380" y="726" font-size="11" font-weight="700"
+      fill="#1C2438" text-anchor="middle">Issues</text>
+<text x="380" y="742" font-size="11" font-weight="700"
+      fill="#1C2438" text-anchor="middle">found?</text>
+
+<!-- Branch label: YES (left → Edit) -->
+<text x="305" y="725" font-size="10.5" fill="#C63D25"
+      font-weight="600" text-anchor="middle">Yes</text>
+<!-- Branch label: NO (right → Save) -->
+<text x="455" y="725" font-size="10.5" fill="#1B7A50"
+      font-weight="600" text-anchor="middle">No</text>
+
+<!-- Arrow: Decision LEFT → Edit -->
+<line x1="328" y1="730" x2="190" y2="788"
+      stroke="#1C2438" stroke-width="1.6" marker-end="url(#ad)"/>
+
+<!-- Arrow: Decision RIGHT → Save -->
+<line x1="432" y1="730" x2="570" y2="788"
+      stroke="#1C2438" stroke-width="1.6" marker-end="url(#ad)"/>
+
+<!-- ══════════════════════════════════════════════════════
+     STEP 5 — EDIT
+══════════════════════════════════════════════════════ -->
+<g filter="url(#sh)">
+  <rect x="45" y="793" width="270" height="58" rx="6"
+        fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1.2"/>
+  <rect x="45" y="793" width="5" height="58" rx="2.5" fill="#C63D25"/>
+</g>
+<text x="68" y="815" font-size="11.5" font-weight="700"
+      fill="#C63D25" letter-spacing="0.1em">EDIT</text>
+<text x="68" y="833" font-size="13" font-weight="600" fill="#1C2438">
+  GPT-image-1 Refinement
+</text>
+<text x="68" y="848" font-size="10.5" fill="#7A8AAA">
+  Edit history injected as context
+</text>
+
+<!-- ══════════════════════════════════════════════════════
+     STEP 6 — SAVE
+══════════════════════════════════════════════════════ -->
+<g filter="url(#sh)">
+  <rect x="445" y="793" width="270" height="58" rx="6"
+        fill="#FFFFFF" stroke="#C8D3EB" stroke-width="1.2"/>
+  <rect x="445" y="793" width="5" height="58" rx="2.5" fill="#1B7A50"/>
+</g>
+<text x="468" y="815" font-size="11.5" font-weight="700"
+      fill="#1B7A50" letter-spacing="0.1em">SAVE</text>
+<text x="468" y="833" font-size="13" font-weight="600" fill="#1C2438">
+  Save to Training Data
+</text>
+<text x="468" y="848" font-size="10.5" fill="#7A8AAA">
+  Pair annotated and stored in JSONL
+</text>
+
+<!-- ══════════════════════════════════════════════════════
+     LOOP ARROW: Edit → back up to Evaluate (left side, red)
+══════════════════════════════════════════════════════ -->
+<!-- Path: from Edit left-center (45, 822) → left to x=18 → up to y=546 → right into Evaluate (45, 546) -->
+<path d="M 45 822 L 18 822 L 18 546 L 45 546"
+      fill="none" stroke="#C63D25" stroke-width="1.8"
+      stroke-dasharray="5,3" marker-end="url(#ar)"/>
+<text x="14" y="692" font-size="10" fill="#C63D25" font-weight="600"
+      text-anchor="middle" transform="rotate(-90,14,692)">Iterate</text>
+
+</svg>
