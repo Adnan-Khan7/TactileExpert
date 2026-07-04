@@ -134,13 +134,13 @@ VIT_THRESHOLDS_CALIBRATED = {
     "extra_parts":     0.85,
 }
 
-# Val-calibrated thresholds — DINOv2 ViT-L/14 probe (retrained July 2026, gamma_neg=8 for QT)
+# Val-calibrated thresholds — DINOv2 ViT-L/14 probe (retrained July 4 2026, +30 GPT pairs)
 DINO_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.55,
-    "broken_lines":    0.60,
-    "missing_parts":   0.50,
-    "missing_texture": 0.50,
-    "extra_parts":     0.55,
+    "too_thick":       0.65,
+    "broken_lines":    0.50,
+    "missing_parts":   0.55,
+    "missing_texture": 0.45,
+    "extra_parts":     0.50,
 }
 
 # Backward-compatible aliases
