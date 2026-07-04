@@ -373,7 +373,8 @@ def main():
         return out
 
     def _store_iteration(label, tac_pil, nat_pil, nat_path, tac_path,
-                         eval_data: dict, instruction: str = "") -> dict:
+                         eval_data: dict, instruction: str = "",
+                         object_name: str = "") -> dict:
         it = {
             "label":       label,
             "pil":         tac_pil,
@@ -381,6 +382,7 @@ def main():
             "nat_path":    nat_path,
             "tac_path":    tac_path,
             "instruction": instruction,
+            "object":      object_name,
             "timestamp":   datetime.now().isoformat(timespec="seconds"),
             # Filled from eval_data (only models that were selected):
             "clip_probs":   eval_data.get("clip_probs",   {}),
@@ -480,12 +482,13 @@ def main():
         eval_data = _run_evaluators(nat_tmp.name, tac_tmp.name, selected_models)
         _store_iteration(f"Iter {len(_state)}", tac_pil, nat_pil,
                          nat_tmp.name, tac_tmp.name, eval_data,
-                         instruction=f"[generated] {prompt[:80]}")
+                         instruction=f"[generated] {prompt[:80]}",
+                         object_name=object_desc.strip())
 
         tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
 
-    def on_eval_upload(nat_pil, tac_pil, mode_lbl, selected_models, trusted_model):
+    def on_eval_upload(nat_pil, tac_pil, object_desc, mode_lbl, selected_models, trusted_model):
         if nat_pil is None:
             return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
         if tac_pil is None:
@@ -498,7 +501,8 @@ def main():
 
         eval_data = _run_evaluators(nat_tmp.name, tac_tmp.name, selected_models)
         _store_iteration(f"Iter {len(_state)}", tac_pil.convert("RGB"), nat_pil,
-                         nat_tmp.name, tac_tmp.name, eval_data)
+                         nat_tmp.name, tac_tmp.name, eval_data,
+                         object_name=object_desc.strip() if object_desc else "")
 
         tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
@@ -537,7 +541,8 @@ def main():
         eval_data = _run_evaluators(last["nat_path"], tac_tmp.name, selected_models)
         _store_iteration(f"Iter {len(_state)}", new_tac, last["nat_pil"],
                          last["nat_path"], tac_tmp.name, eval_data,
-                         instruction=instruction)
+                         instruction=instruction,
+                         object_name=last.get("object", ""))
 
         # Append to edit log (user-visible instruction, not the context-prefixed one)
         _edit_history.append({"label": f"Iter {len(_state)-1}", "instruction": instruction})
@@ -548,6 +553,16 @@ def main():
     def on_view_change(mode_lbl, selected_models, trusted_model):
         tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
         return tbl, clear, strip, log, gallery, prefill
+
+    def on_reeval(mode_lbl, selected_models, trusted_model):
+        if not _state:
+            return (gr.update(),) * 7 + ("⚠ Generate or evaluate an image first.",)
+        last = _state[-1]
+        eval_data = _run_evaluators(last["nat_path"], last["tac_path"], selected_models)
+        for k, v in eval_data.items():
+            last[k] = v
+        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
+        return last["pil"], tbl, clear, strip, log, gallery, prefill, ""
 
     def on_save_to_train(label_selections: list, mode_lbl: str, selected_models: list):
         if not _state:
@@ -562,10 +577,13 @@ def main():
         it["nat_pil"].save(nat_out, format="JPEG", quality=95)
         it["pil"].save(tac_out,    format="JPEG", quality=95)
 
+        nat_rel = str(nat_out.relative_to(TRAIN_DIR))
+        tac_rel = str(tac_out.relative_to(TRAIN_DIR))
         record = {
-            "pair_id":       f"generated/{ts}/natural.jpg::generated/{ts}/tactile.jpg",
-            "natural_image": str(nat_out.relative_to(TRAIN_DIR)),
-            "tactile_image": str(tac_out.relative_to(TRAIN_DIR)),
+            "pair_id":       f"{nat_rel}::{tac_rel}",
+            "natural_image": nat_rel,
+            "tactile_image": tac_rel,
+            "object":        it.get("object", ""),
             "source":        "gpt-image-1",
             "iteration":     it["label"],
             "saved_at":      datetime.now().isoformat(timespec="seconds"),
@@ -729,6 +747,9 @@ def main():
                 gr.Markdown("### Evaluation — all models")
                 eval_table = gr.HTML(_eval_table({}, DEFAULT_THRESHOLD_MODE))
                 all_clear_box = gr.HTML(value="", visible=False)
+                reeval_btn = gr.Button(
+                    "Re-evaluate current image", variant="secondary", size="sm"
+                )
 
                 with gr.Tabs():
 
@@ -786,7 +807,7 @@ def main():
 
         eval_btn.click(
             fn=on_eval_upload,
-            inputs=[nat_img, tac_upload, mode_radio, model_select, trusted_radio],
+            inputs=[nat_img, tac_upload, object_desc, mode_radio, model_select, trusted_radio],
             outputs=_gen_outputs,
         )
 
@@ -809,6 +830,12 @@ def main():
                 inputs=[mode_radio, model_select, trusted_radio],
                 outputs=_view_outputs,
             )
+
+        reeval_btn.click(
+            fn=on_reeval,
+            inputs=[mode_radio, model_select, trusted_radio],
+            outputs=_gen_outputs,
+        )
 
         ui_mode.change(
             fn=lambda m: (
@@ -884,7 +911,7 @@ def main():
         )
 
         # Prefill save labels whenever eval runs
-        for btn in (gen_btn, eval_btn, edit_btn):
+        for btn in (gen_btn, eval_btn, edit_btn, reeval_btn):
             btn.click(
                 fn=_prefill_save_labels,
                 inputs=[mode_radio, model_select],
