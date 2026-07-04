@@ -42,6 +42,7 @@ from generation.gpt_generator import (
 
 HERE      = Path(__file__).resolve().parent
 TRAIN_DIR = HERE / "generated_training_data"
+TRAJ_FILE = TRAIN_DIR / "trajectories.jsonl"
 
 AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16", "DINOv2 Probe"]
 
@@ -68,6 +69,24 @@ _MODEL_KEYS = {
     "ViT-B/16":       ("vit_probs",    "vit_cal"),
     "DINOv2 Probe":   ("dino_probs",   "dino_cal"),
 }
+
+
+# ── Trajectory helpers ────────────────────────────────────────────────────────
+
+def _iter_scores(it: dict, selected_models: list) -> dict:
+    """Per-model probability dicts for one iteration state entry."""
+    scores = {}
+    for model in selected_models:
+        probs = it.get(_MODEL_KEYS[model][0], {})
+        if probs:
+            scores[model] = {opt: round(probs.get(opt, 0.0), 4) for opt in ALL_OPTIONS}
+    return scores
+
+
+def _mean_defect_prob(scores: dict) -> float:
+    """Mean defect probability across all models and all options."""
+    vals = [p for mp in scores.values() for p in mp.values()]
+    return round(sum(vals) / len(vals), 4) if vals else 0.0
 
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
@@ -374,15 +393,16 @@ def main():
 
     def _store_iteration(label, tac_pil, nat_pil, nat_path, tac_path,
                          eval_data: dict, instruction: str = "",
-                         object_name: str = "") -> dict:
+                         object_name: str = "", target_option: str = "") -> dict:
         it = {
-            "label":       label,
-            "pil":         tac_pil,
-            "nat_pil":     nat_pil,
-            "nat_path":    nat_path,
-            "tac_path":    tac_path,
-            "instruction": instruction,
-            "object":      object_name,
+            "label":         label,
+            "pil":           tac_pil,
+            "nat_pil":       nat_pil,
+            "nat_path":      nat_path,
+            "tac_path":      tac_path,
+            "instruction":   instruction,
+            "object":        object_name,
+            "target_option": target_option,
             "timestamp":   datetime.now().isoformat(timespec="seconds"),
             # Filled from eval_data (only models that were selected):
             "clip_probs":   eval_data.get("clip_probs",   {}),
@@ -418,6 +438,7 @@ def main():
                 _edit_log_html([]),
                 _gallery_data(),
                 gr.update(value=""),
+                gr.update(value=None),
             )
         it = _state[-1]
         mr = _get_results(it, mode, selected)
@@ -427,9 +448,9 @@ def main():
 
         all_clear = all(r["all_clear"] for r in mr.values()) if mr else False
 
-        # Bug fix 1a + 1b: use trusted model, combine ALL flagged issues
+        # Use trusted model, combine ALL flagged issues into prefill
         prefill = ""
-        # Resolve which model to pull instructions from
+        top_option = None
         trusted_model = trusted if trusted in mr else (
             next((m for m in selected if m in mr), None))
         if trusted_model and mr.get(trusted_model):
@@ -445,6 +466,7 @@ def main():
                 else:
                     prefill = " ".join(
                         f"{i+1}. {inst}" for i, inst in enumerate(instructions))
+            top_option = flagged_opts[0] if flagged_opts else None
 
         return (
             _eval_table(mr, mode),
@@ -454,6 +476,7 @@ def main():
             _edit_log_html(_edit_history),
             _gallery_data(),
             gr.update(value=prefill),
+            gr.update(value=top_option),
         )
 
     # ── Callbacks ──────────────────────────────────────────────────────────────
@@ -461,22 +484,24 @@ def main():
     def on_generate(nat_pil, object_desc, prompt_text, api_key,
                     mode_lbl, selected_models, trusted_model):
         if nat_pil is None:
-            return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
+            return (gr.update(),) * 8 + ("⚠ Upload a natural reference image first.",)
         if not api_key.strip():
-            return (gr.update(),) * 7 + ("⚠ API key required.",)
+            return (gr.update(),) * 8 + ("⚠ API key required.",)
 
         prompt = prompt_text.strip() or build_prompt(object_desc or "the object")
 
         nat_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        nat_tmp.close()
         nat_pil.save(nat_tmp.name, format="JPEG")
 
         try:
             tac_pil = generate_tactile(api_key=api_key.strip(), prompt=prompt,
                                        natural_reference=nat_pil)
         except Exception as e:
-            return (gr.update(),) * 7 + (_api_error("Generation", e),)
+            return (gr.update(),) * 8 + (_api_error("Generation", e),)
 
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tac_tmp.close()
         tac_pil.save(tac_tmp.name, format="JPEG")
 
         eval_data = _run_evaluators(nat_tmp.name, tac_tmp.name, selected_models)
@@ -485,18 +510,20 @@ def main():
                          instruction=f"[generated] {prompt[:80]}",
                          object_name=object_desc.strip())
 
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
-        return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        return tac_pil, tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
     def on_eval_upload(nat_pil, tac_pil, object_desc, mode_lbl, selected_models, trusted_model):
         if nat_pil is None:
-            return (gr.update(),) * 7 + ("⚠ Upload a natural reference image first.",)
+            return (gr.update(),) * 8 + ("⚠ Upload a natural reference image first.",)
         if tac_pil is None:
-            return (gr.update(),) * 7 + ("⚠ Upload a tactile graphic to evaluate.",)
+            return (gr.update(),) * 8 + ("⚠ Upload a tactile graphic to evaluate.",)
 
         nat_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        nat_tmp.close()
         nat_pil.save(nat_tmp.name, format="JPEG")
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tac_tmp.close()
         tac_pil.convert("RGB").save(tac_tmp.name, format="JPEG")
 
         eval_data = _run_evaluators(nat_tmp.name, tac_tmp.name, selected_models)
@@ -504,19 +531,19 @@ def main():
                          nat_tmp.name, tac_tmp.name, eval_data,
                          object_name=object_desc.strip() if object_desc else "")
 
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
-        return tac_pil, tbl, clear, strip, log, gallery, prefill, ""
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        return tac_pil, tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
-    def on_edit(edit_text, api_key, include_nat, use_context,
+    def on_edit(edit_text, target_option, api_key, include_nat, use_context,
                 mode_lbl, selected_models, trusted_model):
         if not _state:
-            return (gr.update(),) * 7 + ("⚠ Generate first.",)
+            return (gr.update(),) * 8 + ("⚠ Generate first.",)
         if not api_key.strip():
-            return (gr.update(),) * 7 + ("⚠ API key required.",)
+            return (gr.update(),) * 8 + ("⚠ API key required.",)
 
         instruction = edit_text.strip()
         if not instruction:
-            return (gr.update(),) * 7 + ("⚠ Provide an edit instruction.",)
+            return (gr.update(),) * 8 + ("⚠ Provide an edit instruction.",)
 
         # Inject accumulated context
         full_instruction = instruction
@@ -533,59 +560,64 @@ def main():
                 natural_reference=last["nat_pil"] if include_nat else None,
             )
         except Exception as e:
-            return (gr.update(),) * 7 + (_api_error("Edit", e),)
+            return (gr.update(),) * 8 + (_api_error("Edit", e),)
 
         tac_tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tac_tmp.close()
         new_tac.save(tac_tmp.name, format="JPEG")
 
         eval_data = _run_evaluators(last["nat_path"], tac_tmp.name, selected_models)
         _store_iteration(f"Iter {len(_state)}", new_tac, last["nat_pil"],
                          last["nat_path"], tac_tmp.name, eval_data,
                          instruction=instruction,
-                         object_name=last.get("object", ""))
+                         object_name=last.get("object", ""),
+                         target_option=target_option or "")
 
         # Append to edit log (user-visible instruction, not the context-prefixed one)
         _edit_history.append({"label": f"Iter {len(_state)-1}", "instruction": instruction})
 
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
-        return new_tac, tbl, clear, strip, log, gallery, prefill, ""
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        return new_tac, tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
     def on_view_change(mode_lbl, selected_models, trusted_model):
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
-        return tbl, clear, strip, log, gallery, prefill
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        return tbl, clear, strip, log, gallery, prefill, top_opt
 
     def on_reeval(mode_lbl, selected_models, trusted_model):
         if not _state:
-            return (gr.update(),) * 7 + ("⚠ Generate or evaluate an image first.",)
+            return (gr.update(),) * 8 + ("⚠ Generate or evaluate an image first.",)
         last = _state[-1]
         eval_data = _run_evaluators(last["nat_path"], last["tac_path"], selected_models)
         for k, v in eval_data.items():
             last[k] = v
-        tbl, clear, strip, log, gallery, prefill = _render(mode_lbl, selected_models, trusted_model)
-        return last["pil"], tbl, clear, strip, log, gallery, prefill, ""
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        return last["pil"], tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
     def on_save_to_train(label_selections: list, mode_lbl: str, selected_models: list):
         if not _state:
             return "⚠ Nothing to save yet."
-        it = _state[-1]
+        last = _state[-1]
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         pair_dir = TRAIN_DIR / f"pair_{ts}"
         pair_dir.mkdir(parents=True, exist_ok=True)
 
+        # ── Save final natural + tactile images ───────────────────────────────
         nat_out = pair_dir / "natural.jpg"
         tac_out = pair_dir / "tactile.jpg"
-        it["nat_pil"].save(nat_out, format="JPEG", quality=95)
-        it["pil"].save(tac_out,    format="JPEG", quality=95)
+        last["nat_pil"].save(nat_out, format="JPEG", quality=95)
+        last["pil"].save(tac_out,    format="JPEG", quality=95)
 
         nat_rel = str(nat_out.relative_to(TRAIN_DIR))
         tac_rel = str(tac_out.relative_to(TRAIN_DIR))
+
+        # ── Annotation record (existing format — splits_v2 compatible) ────────
         record = {
             "pair_id":       f"{nat_rel}::{tac_rel}",
             "natural_image": nat_rel,
             "tactile_image": tac_rel,
-            "object":        it.get("object", ""),
+            "object":        last.get("object", ""),
             "source":        "gpt-image-1",
-            "iteration":     it["label"],
+            "iteration":     last["label"],
             "saved_at":      datetime.now().isoformat(timespec="seconds"),
         }
         for opt in ALL_OPTIONS:
@@ -594,6 +626,57 @@ def main():
         ann_file = TRAIN_DIR / "annotations.jsonl"
         with open(ann_file, "a") as f:
             f.write(json.dumps(record) + "\n")
+
+        # ── Trajectory record ─────────────────────────────────────────────────
+        # Save each iteration's tactile image and build (state, action, reward) steps.
+        steps = []
+        prev_mean = None
+        for i, it in enumerate(_state):
+            tac_iter_out = pair_dir / f"tactile_iter{i}.jpg"
+            it["pil"].save(tac_iter_out, format="JPEG", quality=95)
+
+            scores   = _iter_scores(it, selected_models)
+            mean_prob = _mean_defect_prob(scores)
+            # Reward = reduction in mean defect probability vs previous step.
+            # Positive = this edit helped. Negative = things got worse.
+            reward = round(prev_mean - mean_prob, 4) if prev_mean is not None else None
+
+            steps.append({
+                "iter_label":       it["label"],
+                "instruction":      it.get("instruction", ""),
+                "target_option":    it.get("target_option", ""),
+                "nat_image":        nat_rel,
+                "tac_image":        str(tac_iter_out.relative_to(TRAIN_DIR)),
+                "scores":           scores,
+                "mean_defect_prob": mean_prob,
+                "reward":           reward,
+            })
+            prev_mean = mean_prob
+
+        # Evaluator flags per model at the final iteration (balanced t=0.50).
+        # Stored separately from human_labels so disagreements are visible.
+        evaluator_flags = {}
+        for model in selected_models:
+            probs = last.get(_MODEL_KEYS[model][0], {})
+            if probs:
+                evaluator_flags[model] = {
+                    opt: int(probs.get(opt, 0.0) > 0.5) for opt in ALL_OPTIONS
+                }
+
+        human_labels = {opt: (1 if opt in label_selections else 0) for opt in ALL_OPTIONS}
+
+        traj = {
+            "trajectory_id":   f"traj_{ts}",
+            "object":          last.get("object", ""),
+            "n_iters":         len(_state),
+            "saved_at":        datetime.now().isoformat(timespec="seconds"),
+            "source":          "gpt-image-1",
+            "steps":           steps,
+            "evaluator_flags": evaluator_flags,
+            "human_labels":    human_labels,
+        }
+        with open(TRAJ_FILE, "a") as f:
+            f.write(json.dumps(traj) + "\n")
 
         return f"✅ Saved to generated_training_data/pair_{ts}/"
 
@@ -626,6 +709,7 @@ def main():
             _edit_log_html([]),
             [],
             gr.update(value=""),
+            gr.update(value=None),
             "",
         )
 
@@ -715,6 +799,13 @@ def main():
                     placeholder="Will populate after first evaluation…",
                     lines=3,
                 )
+                target_dropdown = gr.Dropdown(
+                    choices=[(OPTION_DISPLAY[o], o) for o in ALL_OPTIONS]
+                            + [("Multiple / Other", "multiple")],
+                    value=None,
+                    label="Defect being addressed by this edit",
+                    info="Auto-filled from top flagged issue — change if you're targeting something different",
+                )
                 include_nat_cb = gr.Checkbox(
                     label="Include natural reference in edit call",
                     value=True,
@@ -796,7 +887,8 @@ def main():
         # ── Wiring ──────────────────────────────────────────────────────────────
 
         _gen_outputs = [tac_out, eval_table, all_clear_box,
-                        strip_html, edit_log_html, iter_gallery, edit_box, err_box]
+                        strip_html, edit_log_html, iter_gallery, edit_box,
+                        target_dropdown, err_box]
 
         gen_btn.click(
             fn=on_generate,
@@ -812,17 +904,18 @@ def main():
         )
 
         _edit_outputs = [tac_out, eval_table, all_clear_box,
-                         strip_html, edit_log_html, iter_gallery, edit_box, err_box]
+                         strip_html, edit_log_html, iter_gallery, edit_box,
+                         target_dropdown, err_box]
 
         edit_btn.click(
             fn=on_edit,
-            inputs=[edit_box, api_key, include_nat_cb, use_context_cb,
+            inputs=[edit_box, target_dropdown, api_key, include_nat_cb, use_context_cb,
                     mode_radio, model_select, trusted_radio],
             outputs=_edit_outputs,
         )
 
         _view_outputs = [eval_table, all_clear_box,
-                         strip_html, edit_log_html, iter_gallery, edit_box]
+                         strip_html, edit_log_html, iter_gallery, edit_box, target_dropdown]
 
         for ctrl in (mode_radio, model_select, trusted_radio):
             ctrl.change(
@@ -850,7 +943,8 @@ def main():
         reset_btn.click(
             fn=on_reset,
             outputs=[nat_img, tac_out, eval_table, all_clear_box,
-                     strip_html, edit_log_html, iter_gallery, edit_box, err_box],
+                     strip_html, edit_log_html, iter_gallery, edit_box,
+                     target_dropdown, err_box],
         )
 
         # ── Object auto-detection on image upload ──────────────────────────────

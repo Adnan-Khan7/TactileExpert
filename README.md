@@ -103,31 +103,31 @@ Test set: **153 pairs**, balanced threshold t = 0.50. Models trained on splits_v
 
 | Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Too Thick | 0.581 | 0.553 | 0.500 | 0.613 | 0.585 |
-| Broken Lines | 0.605 | **0.647** | 0.457 | 0.552 | 0.630 |
-| Missing Parts | 0.659 | 0.662 | **0.700** | 0.595 | 0.683 |
-| Missing Texture | 0.888 | **0.904** | 0.839 | 0.849 | 0.884 |
-| Extra Parts | 0.405 | **0.458** | 0.368 | 0.286 | 0.411 |
-| **Macro F1** | 0.628 | **0.645** | 0.573 | 0.579 | 0.639 |
+| Too Thick | **0.602** | 0.587 | 0.500 | 0.469 | 0.585 |
+| Broken Lines | 0.612 | **0.667** | 0.571 | 0.540 | 0.630 |
+| Missing Parts | 0.655 | 0.667 | **0.689** | 0.618 | 0.683 |
+| Missing Texture | 0.882 | **0.916** | 0.855 | 0.848 | 0.884 |
+| Extra Parts | 0.356 | 0.418 | **0.536** | 0.271 | 0.411 |
+| **Macro F1** | 0.621 | **0.651** | 0.630 | 0.549 | 0.639 |
 
 ### AUC (threshold-independent)
 
 | Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Too Thick | 0.800 | 0.833 | 0.788 | **0.852** | 0.831 |
-| Broken Lines | **0.761** | 0.782 | 0.664 | 0.714 | 0.721 |
-| Missing Parts | 0.736 | 0.735 | 0.761 | 0.727 | 0.722 |
-| Missing Texture | 0.817 | **0.844** | 0.722 | 0.766 | 0.789 |
-| Extra Parts | 0.725 | 0.683 | **0.755** | 0.622 | 0.736 |
-| **Macro AUC** | 0.768 | **0.775** | 0.738 | 0.736 | 0.760 |
+| Too Thick | 0.793 | 0.824 | 0.766 | 0.756 | **0.831** |
+| Broken Lines | 0.733 | **0.793** | 0.695 | 0.669 | 0.721 |
+| Missing Parts | **0.745** | 0.729 | **0.745** | 0.712 | 0.722 |
+| Missing Texture | **0.852** | 0.825 | 0.775 | 0.699 | 0.789 |
+| Extra Parts | 0.705 | 0.629 | **0.786** | 0.620 | 0.736 |
+| **Macro AUC** | **0.766** | 0.760 | 0.753 | 0.691 | 0.760 |
 
 **Key findings:**
-- VLM leads on macro F1 (0.645) — fine-tuned vision-language reasoning benefits generalisation
-- DINOv2 Probe macro F1 (0.639) matches CLIP (0.628) without any language supervision; self-supervised structural features are competitive for line-art quality assessment
-- Extra Parts improved most with GPT-augmented training data (+88% relative, 0.323 → 0.411 F1) — GPT-generated graphics systematically over-generate, providing useful training signal
+- VLM leads macro F1 (0.651); CLIP Probe leads macro AUC (0.766) — fine-tuned vision-language reasoning generalises well across defect types
+- DINOv2 Probe (0.639 macro F1) and ResNet-50 (0.630) are competitive without language supervision
+- ResNet-50 Extra Parts jumped from 0.368 → 0.536 with GPT-augmented training — the largest single gain across all models and dimensions
+- GPT augmentation improved VLM F1 on four of five dimensions (macro 0.645 → 0.651), though its Extra Parts F1 regressed (0.458 → 0.418) and ResNet-50 now leads that dimension
+- Missing Texture is the highest-scoring dimension across all models (F1 0.848–0.916), consistent with it being the most visually salient defect
 - Calibrated val-F1-max thresholds improve precision across all models (see `evaluators/constants.py`)
-
-> CLIP, VLM, ResNet-50, and ViT-B/16 numbers are from the pre-augmentation run; GPT-augmented retraining for these models is in progress.
 
 ---
 
@@ -179,6 +179,112 @@ sbatch slurm/run_pipeline.sh
 # CPU-only (for testing / Eval-only mode)
 bash run_local.sh
 ```
+
+---
+
+## Using the UI
+
+### First-time setup per session
+
+1. Start the app (`sbatch slurm/run_pipeline.sh` on GPU, or `bash run_local.sh` for CPU testing)
+2. Find the `gradio.live` public URL in the job log: `tail -f logs/pipeline_<jobid>.out`
+3. Open the URL in any browser — no SSH tunnel needed
+
+### Left panel — controls
+
+| Control | What it does |
+|---|---|
+| **Mode** radio | Switch between *Full pipeline* (generate + evaluate + edit) and *Eval only* (upload any existing tactile and evaluate it) |
+| **Natural reference photograph** | Upload your natural image — CLIP auto-detects the object and fills the object name field |
+| **Object name** | Confirm or correct the detected name — this drives the BANA prompt |
+| **BANA prompt** | Auto-generated from the object name; fully editable before generation |
+| **OpenAI API key** | Entered per session, never stored |
+| **Generate tactile graphic** | Calls GPT-image-1 with the reference photo + prompt, then runs all selected evaluators |
+| **Run evaluators** checkboxes | Select which of the 5 models to run (all 5 recommended when saving for training) |
+| **Pre-fill edit instruction from** | Which model's verdict drives the suggested edit text |
+| **Edit instruction** | Auto-filled from the trusted model's top flagged issue — edit freely before applying |
+| **Defect being addressed** | Dropdown: which defect this edit targets — auto-filled, change if you're overriding the model |
+| **Apply edit** | Sends the instruction to GPT-image-1, re-evaluates, appends a new iteration |
+| **Re-evaluate current image** *(right panel)* | Re-runs evaluators on the current image without a new GPT call — useful when switching models mid-session |
+
+### Right panel — results
+
+- **Evaluation table** — per-option probability bars for every selected model, with a consensus column
+- **Iteration Gallery** — thumbnails of natural reference + every tactile iteration; click to expand
+- **Edit Log** — every instruction you applied, plus the compressed context sent to the next API call
+- **Save to Training** — approve the final image, correct the defect checkboxes, save
+
+### Typical session flow
+
+```
+Upload natural image
+  → CLIP auto-detects object → confirm name
+  → Generate tactile graphic
+  → Inspect image visually (ignore scores first — form your own opinion)
+  → If defects visible:
+      Adjust "Defect being addressed" dropdown if needed
+      Edit instruction → Apply edit
+      Repeat 2-4 times
+  → Save to Training tab
+      Review EVERY checkbox against the actual image
+      Correct any wrong pre-fills
+      Save
+  → Reset session → next image
+```
+
+---
+
+## Ongoing Experiments
+
+### Motivation
+
+Each time a human annotator uses the pipeline, they generate more than a final approved image — they generate a *trajectory*: a sequence of generate → evaluate → edit steps, where each step records what was tried, which defects were flagged, what instruction was given, and whether the edit helped. Accumulating these trajectories enables two things beyond standard supervised retraining:
+
+1. **Reward-guided edit policy** — the evaluator score improvement at each step is a dense reward signal. A lightweight language model can be trained on these trajectories to generate edit instructions automatically, replacing the human in the loop at inference time and enabling fully automated iterative refinement.
+
+2. **Reward model improvement** — whenever the human corrects the evaluator's pre-filled labels before saving, that correction is logged separately (`evaluator_flags` vs `human_labels`). These disagreements are training signal for the evaluators themselves, making the reward signal more reliable over time.
+
+The goal is a self-improving flywheel: human corrections retrain the evaluators → better evaluators produce better rewards → better rewards train a stronger edit policy → stronger policy reaches all-clear in fewer iterations → less human effort per image.
+
+### Data collection loop
+
+Follow these steps each session. Each completed save produces one trajectory record used for both evaluator retraining and edit policy training.
+
+**Before starting**
+- Confirm the pipeline app is running (`tail -f logs/pipeline_<jobid>.out` for the gradio.live URL)
+- Have a folder of natural reference images ready
+
+**Per image — repeat for each natural image**
+
+| Step | Action | Notes |
+|---|---|---|
+| 1 | Upload the natural reference photo | CLIP auto-detects the object; confirm or correct the name |
+| 2 | Select **all 5 evaluators** in the sidebar | Running all models gives the best annotation coverage — defects missed by one model may be caught by another |
+| 3 | Set the trusted model to whichever you trust most for this image type | DINOv2 or VLM are good defaults |
+| 4 | Click **Generate tactile graphic** | Wait for generation + evaluation to complete |
+| 5 | Inspect the result carefully — look at the image directly, not just the model scores | Models are imperfect; your visual judgment is ground truth |
+| 6 | If defects are visible: review the pre-filled edit instruction, adjust if needed, click **Apply edit** | Aim for targeted single-issue instructions ("thin the strokes" not "fix everything") |
+| 7 | Repeat steps 5–6 for **2–4 edit iterations** — don't stop at the first acceptable output | More iterations = richer trajectory = more (state, action, reward) training pairs |
+| 8 | When satisfied, go to the **Save to Training** tab | |
+| 9 | **Review every checkbox manually** against the actual image — do not blindly accept the pre-fill | This is the most important step: your corrections here are the ground truth labels and the signal for detecting evaluator errors |
+| 10 | Click **Save to training data** | Saves the final pair to `annotations.jsonl` and the full trajectory to `trajectories.jsonl` |
+
+**After each batch of ~10–20 images**
+- Check `generated_training_data/annotations.jsonl` line count — confirm saves are landing
+- Check `generated_training_data/trajectories.jsonl` — confirm trajectories have multiple steps and non-null rewards
+- Note any consistent evaluator errors (same model repeatedly wrong on same defect type) — flag for threshold or retraining
+
+### Current targets
+
+| Milestone | Status |
+|---|---|
+| 30 GPT-generated pairs collected and annotated | ✅ Done |
+| All 5 models retrained with GPT-augmented data | ✅ Done (Jul 2026) |
+| 150 pairs collected — sufficient for edit policy training | 🔄 In progress |
+| Evaluator retraining pass 2 (GPT-only baseline) | ⬜ Pending |
+| Evaluator retraining pass 3 (full combined dataset) | ⬜ Pending |
+| Edit policy training (supervised cloning on trajectories) | ⬜ Pending |
+| Edit policy improvement via DPO (preference pairs) | ⬜ Pending |
 
 ---
 

@@ -98,22 +98,22 @@ DEFAULT_THRESHOLD_MODE = "balanced"
 
 BALANCED_THRESHOLDS = {opt: 0.50 for opt in ALL_OPTIONS}
 
-# Val-calibrated thresholds — CLIP Probe v2 (5-head, retrained June 2026)
+# Val-calibrated thresholds — CLIP Probe v2 (retrained July 4 2026, +30 GPT pairs)
 CLIP_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.60,
-    "broken_lines":    0.20,
-    "missing_parts":   0.50,
+    "too_thick":       0.50,
+    "broken_lines":    0.45,
+    "missing_parts":   0.45,
     "missing_texture": 0.50,
-    "extra_parts":     0.50,
+    "extra_parts":     0.45,
 }
 
-# Val-calibrated thresholds — VLM Fine-tuned v2 (Qwen2-VL-2B, epoch 4)
+# Val-calibrated thresholds — VLM Fine-tuned v2 (Qwen2-VL-2B, retrained July 4 2026, +30 GPT pairs, epoch 5)
 VLM_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.15,
-    "broken_lines":    0.10,
-    "missing_parts":   0.15,
-    "missing_texture": 0.10,
-    "extra_parts":     0.20,
+    "too_thick":       0.05,
+    "broken_lines":    0.65,
+    "missing_parts":   0.70,
+    "missing_texture": 0.05,
+    "extra_parts":     0.15,
 }
 
 # Val-calibrated thresholds — ResNet-50 v2 (retrained June 2026)
