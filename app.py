@@ -35,6 +35,7 @@ from evaluators import (CLIPProbeEvaluator, VLMEvaluator,
 from evaluators.constants import (
     ALL_OPTIONS, OPTION_DISPLAY, DEFAULT_THRESHOLD_MODE,
     EDIT_INSTRUCTIONS, build_result,
+    ENSEMBLE_NAME, build_ensemble_result,
 )
 from generation.gpt_generator import (
     build_prompt, generate_tactile, edit_tactile, BANA_TEMPLATE,
@@ -44,9 +45,11 @@ HERE      = Path(__file__).resolve().parent
 TRAIN_DIR = HERE / "generated_training_data"
 TRAJ_FILE = TRAIN_DIR / "trajectories.jsonl"
 
-AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16", "DINOv2 Probe"]
+AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16", "DINOv2 Probe",
+                    ENSEMBLE_NAME]
 
 MODEL_COLOR = {
+    ENSEMBLE_NAME:    "#f1c40f",
     "CLIP Probe":     "#e67e22",
     "VLM Fine-tuned": "#3498db",
     "ResNet-50":      "#8e44ad",
@@ -77,6 +80,8 @@ def _iter_scores(it: dict, selected_models: list) -> dict:
     """Per-model probability dicts for one iteration state entry."""
     scores = {}
     for model in selected_models:
+        if model not in _MODEL_KEYS:   # Ensemble — derived, not stored per-model
+            continue
         probs = it.get(_MODEL_KEYS[model][0], {})
         if probs:
             scores[model] = {opt: round(probs.get(opt, 0.0), 4) for opt in ALL_OPTIONS}
@@ -170,11 +175,13 @@ def _eval_table(model_results: dict, mode: str) -> str:
         f"</tr>"
     )
 
-    # One row per option
+    # One row per option. The Ensemble is itself a consensus, so it is shown
+    # as a column but excluded from the Consensus tally.
+    real_models = [m for m in models if m != ENSEMBLE_NAME]
     rows = []
     for opt in ALL_OPTIONS:
         label = OPTION_DISPLAY[opt]
-        flagged_by = [m for m in models if opt in model_results[m]["flagged"]]
+        flagged_by = [m for m in real_models if opt in model_results[m]["flagged"]]
 
         cells = []
         for m in models:
@@ -200,7 +207,7 @@ def _eval_table(model_results: dict, mode: str) -> str:
             f"<td style='padding:5px 8px;font-size:12px;font-weight:600'>{label}</td>"
             + "".join(cells)
             + f"<td style='padding:4px 6px;text-align:center'>"
-              f"{_consensus_badge(flagged_by, total)}</td>"
+              f"{_consensus_badge(flagged_by, len(real_models))}</td>"
             f"</tr>"
         )
 
@@ -312,12 +319,20 @@ def _api_error(stage: str, e: Exception) -> str:
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def _get_results(it: dict, mode: str, selected: list[str]) -> dict:
-    """Return {model_name: result_dict} for selected models present in this iteration."""
+    """Return {model_name: result_dict} for selected models present in this iteration.
+
+    The weighted Ensemble is a derived pseudo-model: computed from whatever
+    real models are present (weights renormalised over that subset).
+    """
     out = {}
     for m in selected:
+        if m not in _MODEL_KEYS:
+            continue
         pk, ck = _MODEL_KEYS[m]
         if it.get(pk):
             out[m] = build_result(it[pk], it[ck], mode)
+    if ENSEMBLE_NAME in selected and len(out) >= 2:
+        out[ENSEMBLE_NAME] = build_ensemble_result(out, mode)
     return out
 
 
@@ -393,7 +408,9 @@ def main():
 
     def _store_iteration(label, tac_pil, nat_pil, nat_path, tac_path,
                          eval_data: dict, instruction: str = "",
-                         object_name: str = "", target_option: str = "") -> dict:
+                         object_name: str = "", target_option: str = "",
+                         prefill_instruction: str = "",
+                         prefill_trusted: str = "") -> dict:
         it = {
             "label":         label,
             "pil":           tac_pil,
@@ -403,6 +420,8 @@ def main():
             "instruction":   instruction,
             "object":        object_name,
             "target_option": target_option,
+            "prefill_instruction": prefill_instruction,
+            "prefill_trusted":     prefill_trusted,
             "timestamp":   datetime.now().isoformat(timespec="seconds"),
             # Filled from eval_data (only models that were selected):
             "clip_probs":   eval_data.get("clip_probs",   {}),
@@ -428,9 +447,15 @@ def main():
             items.append((it["pil"], it["label"]))
         return items
 
+    # Prefill shown to the user at the time they type an edit — captured so the
+    # (prefill, actual instruction) pair can be logged as DPO preference data.
+    _prefill_ctx = {"text": "", "trusted": ""}
+
     def _render(mode_lbl: str, selected: list[str], trusted: str = ""):
         mode = _mode(mode_lbl)
         if not _state:
+            _prefill_ctx["text"] = ""
+            _prefill_ctx["trusted"] = ""
             return (
                 _eval_table({}, mode),
                 gr.update(value="", visible=False),
@@ -467,6 +492,13 @@ def main():
                     prefill = " ".join(
                         f"{i+1}. {inst}" for i, inst in enumerate(instructions))
             top_option = flagged_opts[0] if flagged_opts else None
+
+        # Ground generic template wording in the known object name
+        obj = (it.get("object") or "").strip()
+        if prefill and obj:
+            prefill = prefill.replace("the object", f"the {obj}")
+        _prefill_ctx["text"]    = prefill
+        _prefill_ctx["trusted"] = trusted_model or ""
 
         return (
             _eval_table(mr, mode),
@@ -545,6 +577,11 @@ def main():
         if not instruction:
             return (gr.update(),) * 8 + ("⚠ Provide an edit instruction.",)
 
+        # Capture the prefill that was on screen when this edit was typed —
+        # (prefill, instruction) is a DPO preference pair when they differ.
+        prefill_shown   = _prefill_ctx["text"]
+        prefill_trusted = _prefill_ctx["trusted"]
+
         # Inject accumulated context
         full_instruction = instruction
         if use_context and _edit_history:
@@ -558,6 +595,7 @@ def main():
                 current_tactile=last["pil"],
                 edit_instruction=full_instruction,
                 natural_reference=last["nat_pil"] if include_nat else None,
+                object_name=last.get("object", ""),
             )
         except Exception as e:
             return (gr.update(),) * 8 + (_api_error("Edit", e),)
@@ -571,7 +609,9 @@ def main():
                          last["nat_path"], tac_tmp.name, eval_data,
                          instruction=instruction,
                          object_name=last.get("object", ""),
-                         target_option=target_option or "")
+                         target_option=target_option or "",
+                         prefill_instruction=prefill_shown,
+                         prefill_trusted=prefill_trusted)
 
         # Append to edit log (user-visible instruction, not the context-prefixed one)
         _edit_history.append({"label": f"Iter {len(_state)-1}", "instruction": instruction})
@@ -641,10 +681,15 @@ def main():
             # Positive = this edit helped. Negative = things got worse.
             reward = round(prev_mean - mean_prob, 4) if prev_mean is not None else None
 
+            prefill = it.get("prefill_instruction", "")
             steps.append({
                 "iter_label":       it["label"],
                 "instruction":      it.get("instruction", ""),
                 "target_option":    it.get("target_option", ""),
+                "prefill_instruction": prefill,
+                "prefill_trusted":  it.get("prefill_trusted", ""),
+                "accepted_prefill": bool(prefill) and
+                                    it.get("instruction", "").strip() == prefill.strip(),
                 "nat_image":        nat_rel,
                 "tac_image":        str(tac_iter_out.relative_to(TRAIN_DIR)),
                 "scores":           scores,
@@ -653,15 +698,15 @@ def main():
             })
             prev_mean = mean_prob
 
-        # Evaluator flags per model at the final iteration (balanced t=0.50).
-        # Stored separately from human_labels so disagreements are visible.
+        # Evaluator flags per model at the final iteration (balanced t=0.50),
+        # including the weighted Ensemble when selected. Stored separately from
+        # human_labels so disagreements are visible.
         evaluator_flags = {}
-        for model in selected_models:
-            probs = last.get(_MODEL_KEYS[model][0], {})
-            if probs:
-                evaluator_flags[model] = {
-                    opt: int(probs.get(opt, 0.0) > 0.5) for opt in ALL_OPTIONS
-                }
+        for model, res in _get_results(last, "balanced", selected_models).items():
+            evaluator_flags[model] = {
+                opt: int(res["options"][opt]["flagged"])
+                for opt in ALL_OPTIONS if opt in res["options"]
+            }
 
         human_labels = {opt: (1 if opt in label_selections else 0) for opt in ALL_OPTIONS}
 
@@ -791,7 +836,7 @@ def main():
                 )
                 trusted_radio = gr.Radio(
                     choices=AVAILABLE_MODELS,
-                    value="CLIP Probe",
+                    value=ENSEMBLE_NAME,
                     label="Pre-fill edit instruction from",
                 )
                 edit_box = gr.Textbox(

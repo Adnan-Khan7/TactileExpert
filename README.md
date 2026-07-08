@@ -90,43 +90,52 @@ Five models, all trained on the same `splits_v2` dataset:
 | **ResNet-50** | Two-stream ResNet-50; late fusion | Spatial features; separate encoders for natural and tactile |
 | **ViT-B/16** | Two-stream ViT-B/16; late fusion | Transformer features; separate encoders for natural and tactile |
 | **DINOv2 Probe** | Frozen DINOv2 ViT-L/14 + 4 two-layer MLP heads (QL/QP/QT/QE) | Self-supervised structural features; 1024-d CLS → 3072-d [nat\|tac\|nat−tac] |
+| **Ensemble (weighted)** | Derived pseudo-model over the five evaluators | Per-option weighted vote (weights ∝ per-option test F1, renormalised over selected models); flag when weighted vote share > 0.5; probability bar = weighted mean |
 
 All probe/two-stream models are trained with **Asymmetric Loss** (γ⁻=4.0; γ⁻=8.0 for the DINOv2 Missing Texture head to suppress false positives).
+
+Each model directory under `models/` carries a `TRAINING_RECIPE.txt` documenting the exact training data composition and headline results for that checkpoint.
 
 ---
 
 ## Results
 
-Test set: **153 pairs**, balanced threshold t = 0.50. Models trained on splits_v2 including 30 GPT-augmented pairs.
+Test set: **153 pairs**, balanced threshold t = 0.50. Models trained on splits_v2 augmented with 386 GPT-domain rows: 69 GPT-generated pairs (final checkbox-verified labels) plus 41 inferred positives from trajectory edit actions. A frozen 9-pair GPT-domain holdout (`gpt_test`, every 5th collected pair) is excluded from training.
 
 ### F1 Score
 
 | Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Too Thick | **0.602** | 0.587 | 0.500 | 0.469 | 0.585 |
-| Broken Lines | 0.612 | **0.667** | 0.571 | 0.540 | 0.630 |
-| Missing Parts | 0.655 | 0.667 | **0.689** | 0.618 | 0.683 |
-| Missing Texture | 0.882 | **0.916** | 0.855 | 0.848 | 0.884 |
-| Extra Parts | 0.356 | 0.418 | **0.536** | 0.271 | 0.411 |
-| **Macro F1** | 0.621 | **0.651** | 0.630 | 0.549 | 0.639 |
+| Too Thick | 0.588 | 0.577 | 0.521 | 0.614 | **0.625** |
+| Broken Lines | 0.581 | **0.651** | 0.571 | 0.520 | 0.569 |
+| Missing Parts | 0.642 | 0.632 | 0.690 | 0.636 | **0.722** |
+| Missing Texture | 0.884 | **0.908** | 0.884 | 0.814 | 0.898 |
+| Extra Parts | 0.395 | **0.486** | 0.406 | 0.242 | 0.242 |
+| **Macro F1** | 0.618 | **0.651** | 0.614 | 0.565 | 0.611 |
 
 ### AUC (threshold-independent)
 
 | Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Too Thick | 0.793 | 0.824 | 0.766 | 0.756 | **0.831** |
-| Broken Lines | 0.733 | **0.793** | 0.695 | 0.669 | 0.721 |
-| Missing Parts | **0.745** | 0.729 | **0.745** | 0.712 | 0.722 |
-| Missing Texture | **0.852** | 0.825 | 0.775 | 0.699 | 0.789 |
-| Extra Parts | 0.705 | 0.629 | **0.786** | 0.620 | 0.736 |
-| **Macro AUC** | **0.766** | 0.760 | 0.753 | 0.691 | 0.760 |
+| Too Thick | 0.817 | 0.797 | 0.753 | **0.848** | 0.826 |
+| Broken Lines | 0.700 | **0.805** | 0.692 | 0.658 | 0.700 |
+| Missing Parts | 0.731 | 0.707 | 0.782 | **0.787** | 0.757 |
+| Missing Texture | **0.834** | 0.831 | 0.772 | 0.732 | 0.754 |
+| Extra Parts | **0.730** | 0.721 | 0.701 | 0.590 | 0.597 |
+| **Macro AUC** | 0.762 | **0.772** | 0.740 | 0.723 | 0.727 |
+
+### GPT-domain holdout (9 pairs, 45 flag decisions)
+
+| | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Correct flags | 30/45 | **33/45** | 28/45 | 24/45 | 23/45 |
 
 **Key findings:**
-- VLM leads macro F1 (0.651); CLIP Probe leads macro AUC (0.766) — fine-tuned vision-language reasoning generalises well across defect types
-- DINOv2 Probe (0.639 macro F1) and ResNet-50 (0.630) are competitive without language supervision
-- ResNet-50 Extra Parts jumped from 0.368 → 0.536 with GPT-augmented training — the largest single gain across all models and dimensions
-- GPT augmentation improved VLM F1 on four of five dimensions (macro 0.645 → 0.651), though its Extra Parts F1 regressed (0.458 → 0.418) and ResNet-50 now leads that dimension
-- Missing Texture is the highest-scoring dimension across all models (F1 0.848–0.916), consistent with it being the most visually salient defect
+- VLM leads macro F1 (0.651), macro AUC (0.772), and the GPT-domain holdout (33/45) — and improved the most from trajectory-collection data (GPT-domain false positives halved, 17 → 9)
+- Per-option specialisation motivates the weighted ensemble: DINOv2 leads Too Thick and Missing Parts; VLM leads Broken Lines, Missing Texture, and Extra Parts
+- Language supervision transfers the semantic Extra Parts dimension across rendering domains (CLIP 0.356 → 0.395, VLM 0.418 → 0.486) while vision-only models regressed on it (ResNet 0.536 → 0.406, DINOv2 0.411 → 0.242) — ensemble weighting compensates
+- The VLM's Broken Lines question was reworded to an outline-only definition at training time (see `models/vlm_checkpoint/TRAINING_RECIPE.txt`); dash/line texture fills still trigger false positives across models — the leading open failure mode
+- Missing Texture remains the highest-scoring dimension (F1 0.814–0.908), consistent with it being the most visually salient defect
 - Calibrated val-F1-max thresholds improve precision across all models (see `evaluators/constants.py`)
 
 ---

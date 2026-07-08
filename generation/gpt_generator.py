@@ -24,7 +24,10 @@ in the image. Do not substitute a generic or canonical depiction of the object.
 
 BANA guidelines to follow:
 - Draw ONLY the subject object — remove all background scenery, environment, and context. \
-The background must be plain white with no texture, shadow, or surrounding elements.
+The background must be plain white with no texture, shadow, or surrounding elements. \
+Do not include people, hands, or secondary objects unless they are themselves the subject.
+- Never draw a frame, border, or box around the graphic — the white page edge itself is \
+the boundary.
 - The complete object must be fully visible within the image boundaries — do not crop, \
 clip, or cut off any part of the subject. Leave adequate white margin on all four sides.
 - Use bold, continuous black outlines with no gaps or breaks (minimum 1.5 mm stroke width \
@@ -32,9 +35,19 @@ when embossed at standard resolution)
 - Keep all adjacent lines separated by at least 1.5 mm so a fingertip can distinguish them
 - Apply distinct tactile texture fills (fine dots, diagonal lines, crosshatch, or stipple) \
 to differentiate surfaces or regions that appear visually distinct in the reference photograph
+- Every enclosed region must be either fully covered by its texture fill or left \
+deliberately smooth — never partially or unevenly filled
+- Do not leave any stray, disconnected, or leftover line fragments — every line must belong \
+to a defined part of the subject
+- Surfaces that display visual content in the photograph (screens, displays, panels with \
+markings) must be rendered as blank regions
 - Include all significant anatomical or structural parts visible in the reference image — \
 do not simplify to the point of omission
-- No shadows, no gradients, no colour fills — black outlines and texture patterns on white only
+- Omit ALL text, logos, brand names, and written labels even when they appear in the \
+reference photograph — raised lettering is not legible by touch and must not be rendered \
+(labels are added separately in braille, never as part of the graphic)
+- No shadows, no gradients, no colour fills — black outlines and texture patterns on white \
+only; texture fills must be crisp black marks, never grayscale, halftone, or photographic noise
 - Avoid decorative elements, labels, or fine detail that would merge or become tactilely \
 ambiguous at embossed resolution
 
@@ -145,6 +158,7 @@ def edit_tactile(
     edit_instruction: str,
     natural_reference: Image.Image | None = None,
     size: str = "1024x1024",
+    object_name: str = "",
 ) -> Image.Image:
     """
     Call GPT-image-1 in edit mode to refine an existing tactile graphic.
@@ -167,20 +181,23 @@ def edit_tactile(
 
     client = OpenAI(api_key=api_key)
 
+    subject = object_name.strip() or "object"
     images = [_png_buffer(current_tactile, "tactile.png")]
     if natural_reference is not None:
         images.append(_png_buffer(_pad_to_square(natural_reference.convert("RGB")), "reference.png"))
         prompt = (
-            "The first image is a tactile graphic intended for embossing on swell "
-            "paper; the second image is the natural reference photograph of the "
-            "same object. Edit the FIRST image only. Use the reference photograph "
-            "to verify shapes, parts, and surface regions. Apply the following "
-            f"correction while preserving all other features: {edit_instruction}"
+            f"The first image is a tactile graphic of a {subject} intended for "
+            "embossing on swell paper; the second image is the natural reference "
+            f"photograph of the same {subject}. Edit the FIRST image only. Use "
+            f"the reference photograph to verify the {subject}'s shapes, parts, "
+            "and surface regions. Apply the following correction while "
+            f"preserving all other features: {edit_instruction}"
         )
     else:
         prompt = (
-            "This is a tactile graphic intended for embossing on swell paper. "
-            f"Apply the following correction while preserving all other features: {edit_instruction}"
+            f"This is a tactile graphic of a {subject} intended for embossing "
+            "on swell paper. Apply the following correction while preserving "
+            f"all other features: {edit_instruction}"
         )
 
     response = client.images.edit(
