@@ -209,12 +209,3 @@ Setup: `pip install -r requirements.txt`; checkpoints go under `models/`; the VL
 ---
 
 ## Citation
-
-```bibtex
-@misc{tactileexpert2026,
-  author = {Khan, Adnan and Majid, Majid},
-  title  = {TactileExpert: Human-in-the-Loop Generation and Quality Evaluation of Tactile Graphics},
-  year   = {2026},
-  url    = {https://github.com/Adnan-Khan7/TactileExpert}
-}
-```
