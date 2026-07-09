@@ -194,11 +194,20 @@ def _eval_table(model_results: dict, mode: str) -> str:
                 if flag else
                 "<span style='color:#27ae60;font-size:10px'>✓</span>"
             )
+            if "vote_share" in d:
+                # Ensemble cell: the flag tests the weighted VOTE share, not the
+                # mean probability — display the quantity actually decided on.
+                stats_line = (f"vote={d['vote_share']:.2f} · {d['n_agree']}/{d['n_models']}"
+                              f"<br>p̄={prob:.2f}")
+                bar = _prob_bar(d["vote_share"], 0.5, flag)
+            else:
+                stats_line = f"p={prob:.2f} t={thresh:.2f}"
+                bar = _prob_bar(prob, thresh, flag)
             cells.append(
                 f"<td style='padding:4px 6px;text-align:center'>"
                 f"{badge}<br>"
-                f"{_prob_bar(prob, thresh, flag)}"
-                f"<span style='font-size:10px;color:#666'>p={prob:.2f} t={thresh:.2f}</span>"
+                f"{bar}"
+                f"<span style='font-size:10px;color:#666'>{stats_line}</span>"
                 f"</td>"
             )
 
@@ -219,6 +228,57 @@ def _eval_table(model_results: dict, mode: str) -> str:
         f"{head_row}{''.join(rows)}</table></div>"
     )
     return table
+
+
+def _ensemble_card(mr: dict, mode: str) -> str:
+    """Default simplified view: ensemble verdict + suggested edits by priority."""
+    if ENSEMBLE_NAME not in mr:
+        return ""
+    res = mr[ENSEMBLE_NAME]
+    flagged = sorted(res["flagged"],
+                     key=lambda o: -res["options"][o].get("vote_share", 0))
+    if not flagged:
+        verdict = ("<span style='color:#27ae60;font-size:16px;font-weight:700'>"
+                   "✓ All clear — no defects flagged by the weighted ensemble</span>")
+        body = ""
+    else:
+        verdict = (f"<span style='color:#e74c3c;font-size:16px;font-weight:700'>"
+                   f"⚠ {len(flagged)} issue{'s' if len(flagged) > 1 else ''} flagged"
+                   f"</span> <span style='font-size:12px;color:#888'>— by priority</span>")
+        items = []
+        for i, o in enumerate(flagged):
+            d = res["options"][o]
+            items.append(
+                f"<div style='margin:7px 0;padding:8px 10px;background:#fdf6f6;"
+                f"border-left:3px solid #e74c3c;border-radius:4px'>"
+                f"<span style='font-weight:700;font-size:13px'>{i+1}. {OPTION_DISPLAY[o]}</span>"
+                f"<span style='font-size:11px;color:#888'> &nbsp;{d['n_agree']}/{d['n_models']} models agree · "
+                f"vote {d['vote_share']:.0%} · mean p {d['prob_yes']:.2f}</span><br>"
+                f"<span style='font-size:12px;color:#444'>{d['edit_instruction']}</span>"
+                f"</div>")
+        body = "".join(items)
+    clean = [OPTION_DISPLAY[o] for o in ALL_OPTIONS
+             if o in res["options"] and o not in res["flagged"]]
+    clean_line = (f"<div style='font-size:11px;color:#27ae60;margin-top:6px'>"
+                  f"Clear: {', '.join(clean)}</div>" if clean else "")
+    return (f"<div style='font-family:sans-serif;border:1px solid #f1c40f;border-radius:8px;"
+            f"padding:12px 14px;background:#fffdf5'>"
+            f"<div style='font-size:11px;color:#b7950b;font-weight:700;margin-bottom:4px'>"
+            f"ENSEMBLE (WEIGHTED) · {mode} thresholds</div>"
+            f"{verdict}{body}{clean_line}</div>")
+
+
+def _eval_view(mr: dict, mode: str) -> str:
+    """Ensemble card up front; full per-model decision table behind a toggle."""
+    table = _eval_table(mr, mode)
+    card = _ensemble_card(mr, mode)
+    if not card:
+        return table
+    return (card +
+            "<details style='margin-top:8px;font-family:sans-serif'>"
+            "<summary style='cursor:pointer;color:#888;font-size:12px'>"
+            "Show full per-model decision table</summary>"
+            f"<div style='margin-top:6px'>{table}</div></details>")
 
 
 def _iteration_strip(state: list[dict], model_results_list: list[dict]) -> str:
@@ -451,13 +511,14 @@ def main():
     # (prefill, actual instruction) pair can be logged as DPO preference data.
     _prefill_ctx = {"text": "", "trusted": ""}
 
-    def _render(mode_lbl: str, selected: list[str], trusted: str = ""):
+    def _render(mode_lbl: str, selected: list[str], trusted: str = "",
+                combine_all: bool = False):
         mode = _mode(mode_lbl)
         if not _state:
             _prefill_ctx["text"] = ""
             _prefill_ctx["trusted"] = ""
             return (
-                _eval_table({}, mode),
+                _eval_view({}, mode),
                 gr.update(value="", visible=False),
                 _iteration_strip([], []),
                 _edit_log_html([]),
@@ -486,11 +547,12 @@ def main():
                 if mr[trusted_model]["options"][opt].get("edit_instruction")
             ]
             if instructions:
-                if len(instructions) == 1:
-                    prefill = instructions[0]
-                else:
+                if combine_all and len(instructions) > 1:
                     prefill = " ".join(
                         f"{i+1}. {inst}" for i, inst in enumerate(instructions))
+                else:
+                    # Default: top-priority issue only — one targeted edit at a time
+                    prefill = instructions[0]
             top_option = flagged_opts[0] if flagged_opts else None
 
         # Ground generic template wording in the known object name
@@ -501,7 +563,7 @@ def main():
         _prefill_ctx["trusted"] = trusted_model or ""
 
         return (
-            _eval_table(mr, mode),
+            _eval_view(mr, mode),
             gr.update(value=_all_clear_html() if all_clear else "",
                       visible=all_clear),
             _iteration_strip(_state, mr_list),
@@ -514,7 +576,7 @@ def main():
     # ── Callbacks ──────────────────────────────────────────────────────────────
 
     def on_generate(nat_pil, object_desc, prompt_text, api_key,
-                    mode_lbl, selected_models, trusted_model):
+                    mode_lbl, selected_models, trusted_model, combine_all):
         if nat_pil is None:
             return (gr.update(),) * 8 + ("⚠ Upload a natural reference image first.",)
         if not api_key.strip():
@@ -542,10 +604,12 @@ def main():
                          instruction=f"[generated] {prompt[:80]}",
                          object_name=object_desc.strip())
 
-        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(
+            mode_lbl, selected_models, trusted_model, combine_all)
         return tac_pil, tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
-    def on_eval_upload(nat_pil, tac_pil, object_desc, mode_lbl, selected_models, trusted_model):
+    def on_eval_upload(nat_pil, tac_pil, object_desc, mode_lbl, selected_models,
+                       trusted_model, combine_all):
         if nat_pil is None:
             return (gr.update(),) * 8 + ("⚠ Upload a natural reference image first.",)
         if tac_pil is None:
@@ -563,11 +627,12 @@ def main():
                          nat_tmp.name, tac_tmp.name, eval_data,
                          object_name=object_desc.strip() if object_desc else "")
 
-        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(
+            mode_lbl, selected_models, trusted_model, combine_all)
         return tac_pil, tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
     def on_edit(edit_text, target_option, api_key, include_nat, use_context,
-                mode_lbl, selected_models, trusted_model):
+                mode_lbl, selected_models, trusted_model, combine_all):
         if not _state:
             return (gr.update(),) * 8 + ("⚠ Generate first.",)
         if not api_key.strip():
@@ -616,21 +681,24 @@ def main():
         # Append to edit log (user-visible instruction, not the context-prefixed one)
         _edit_history.append({"label": f"Iter {len(_state)-1}", "instruction": instruction})
 
-        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(
+            mode_lbl, selected_models, trusted_model, combine_all)
         return new_tac, tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
-    def on_view_change(mode_lbl, selected_models, trusted_model):
-        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+    def on_view_change(mode_lbl, selected_models, trusted_model, combine_all):
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(
+            mode_lbl, selected_models, trusted_model, combine_all)
         return tbl, clear, strip, log, gallery, prefill, top_opt
 
-    def on_reeval(mode_lbl, selected_models, trusted_model):
+    def on_reeval(mode_lbl, selected_models, trusted_model, combine_all):
         if not _state:
             return (gr.update(),) * 8 + ("⚠ Generate or evaluate an image first.",)
         last = _state[-1]
         eval_data = _run_evaluators(last["nat_path"], last["tac_path"], selected_models)
         for k, v in eval_data.items():
             last[k] = v
-        tbl, clear, strip, log, gallery, prefill, top_opt = _render(mode_lbl, selected_models, trusted_model)
+        tbl, clear, strip, log, gallery, prefill, top_opt = _render(
+            mode_lbl, selected_models, trusted_model, combine_all)
         return last["pil"], tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
     def on_save_to_train(label_selections: list, mode_lbl: str, selected_models: list):
@@ -839,6 +907,11 @@ def main():
                     value=ENSEMBLE_NAME,
                     label="Pre-fill edit instruction from",
                 )
+                combine_cb = gr.Checkbox(
+                    label="Combine all flagged issues in pre-fill",
+                    value=False,
+                    info="Default off: pre-fill only the top-priority issue — one targeted edit at a time",
+                )
                 edit_box = gr.Textbox(
                     label="Edit instruction (auto-filled — editable)",
                     placeholder="Will populate after first evaluation…",
@@ -938,13 +1011,14 @@ def main():
         gen_btn.click(
             fn=on_generate,
             inputs=[nat_img, object_desc, prompt_box, api_key,
-                    mode_radio, model_select, trusted_radio],
+                    mode_radio, model_select, trusted_radio, combine_cb],
             outputs=_gen_outputs,
         )
 
         eval_btn.click(
             fn=on_eval_upload,
-            inputs=[nat_img, tac_upload, object_desc, mode_radio, model_select, trusted_radio],
+            inputs=[nat_img, tac_upload, object_desc, mode_radio, model_select,
+                    trusted_radio, combine_cb],
             outputs=_gen_outputs,
         )
 
@@ -955,23 +1029,23 @@ def main():
         edit_btn.click(
             fn=on_edit,
             inputs=[edit_box, target_dropdown, api_key, include_nat_cb, use_context_cb,
-                    mode_radio, model_select, trusted_radio],
+                    mode_radio, model_select, trusted_radio, combine_cb],
             outputs=_edit_outputs,
         )
 
         _view_outputs = [eval_table, all_clear_box,
                          strip_html, edit_log_html, iter_gallery, edit_box, target_dropdown]
 
-        for ctrl in (mode_radio, model_select, trusted_radio):
+        for ctrl in (mode_radio, model_select, trusted_radio, combine_cb):
             ctrl.change(
                 fn=on_view_change,
-                inputs=[mode_radio, model_select, trusted_radio],
+                inputs=[mode_radio, model_select, trusted_radio, combine_cb],
                 outputs=_view_outputs,
             )
 
         reeval_btn.click(
             fn=on_reeval,
-            inputs=[mode_radio, model_select, trusted_radio],
+            inputs=[mode_radio, model_select, trusted_radio, combine_cb],
             outputs=_gen_outputs,
         )
 

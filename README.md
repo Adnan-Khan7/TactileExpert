@@ -1,305 +1,214 @@
-# TactileExpert
+# TactileExpert — Status Meeting · 9 July 2026
 
-**Human-in-the-loop pipeline for generating and evaluating tactile graphics for blind and visually impaired learners.**
-
-Tactile graphics — embossed line drawings explored through touch — are essential learning materials for BVI students, yet remain costly and expert-dependent to produce. TactileExpert is a human-in-the-loop system that generates BANA-compliant tactile graphics from natural reference photographs using GPT-image-1, evaluates candidate quality across five defect dimensions with an ensemble of five fine-tuned models, and enables iterative refinement with automatic edit-history injection. Approved pairs are saved directly to a training dataset, closing the loop between generation and model improvement.
+**A human-in-the-loop system that generates tactile graphics for blind and visually impaired (BVI) learners, judges its own output with a panel of trained evaluator models, and gets better every time a human corrects it.**
 
 ![Pipeline Diagram](pipeline_diagram.png)
 
 ---
 
-## Research Contributions
+## 1. Motivation
 
-- **Annotated dataset** — 987 natural–tactile image pairs across six object categories, 100% human-annotated for five BANA-grounded defect dimensions (+30 GPT-generated pairs for training augmentation)
-- **Five evaluator models** — CLIP Probe, fine-tuned VLM (Qwen2-VL-2B + LoRA), ResNet-50 two-stream, ViT-B/16 two-stream, and DINOv2 ViT-L/14 Probe; all trained on the same annotated splits
-- **End-to-end pipeline** — reference photo → GPT-image-1 generation → multi-model evaluation → iterative refinement → training-data collection, in a single Gradio interface
+Tactile graphics — embossed line drawings that BVI students read with their fingertips — are essential learning materials, but making one is slow and needs an expert. Image generators like GPT-image-1 can draft them in seconds, but the drafts have defects a sighted designer would catch instantly: lines too thick to tell apart, gaps in outlines, missing parts, missing texture, invented extras.
 
----
+So the question this project answers is: **can we teach models to catch those defects, so a human only has to make the final call — and can every human correction make the system smarter?**
 
-## Pipeline
+The system has three jobs:
 
-| Step | Action |
-|---|---|
-| **1. Upload** | Natural reference photograph; CLIP zero-shot classifies the object and pre-fills the object name field (~10 ms) |
-| **2. Generate** | GPT-image-1 generates a tactile graphic candidate using a BANA-grounded prompt; the reference photo is sent directly to the API |
-| **3. Evaluate** | Five models independently score the candidate across five defect dimensions; results shown as per-option probability bars with consensus column |
-| **4. Edit** | Select which model to trust; prior corrections are compressed and injected as context (GPT-image-1 has no text memory across calls) |
-| **5. Iterate** | Repeat evaluate → edit until all selected models show no defects |
-| **6. Save** | Approve the final pair; image files and defect labels saved to the training dataset in JSONL format |
-
-The API key is entered in the UI per session and is never stored or logged.
-
-### UI Modes
-
-| Mode | Description |
-|---|---|
-| **Full pipeline** | Generate + evaluate + edit via GPT-image-1 (requires OpenAI API key) |
-| **Eval only** | Upload any existing tactile graphic and run the evaluators without API calls |
-
-### Threshold Modes
-
-| Mode | Description |
-|---|---|
-| **Balanced** (default) | Fixed t = 0.50 for all options; all-clear state is reachable |
-| **Calibrated** | Per-option val-F1-maximising thresholds (see `evaluators/constants.py`) |
+1. **Generate** a tactile graphic from a photo, following BANA (Braille Authority of North America) design rules.
+2. **Evaluate** it with five independently trained models — each scoring the same five defect dimensions — plus a weighted ensemble that combines their votes.
+3. **Learn** from the human: every edit instruction, every corrected label, and every accepted or rejected suggestion is logged as training data.
 
 ---
 
-## Defect Dimensions
+## 2. The pipeline, step by step
 
-Five dimensions defined per BANA guidelines, each treated as an independent binary classification problem:
+| Step | What happens |
+|---|---|
+| **1. Upload** | User uploads a natural reference photo. CLIP zero-shot identifies the object and pre-fills its name (~10 ms). |
+| **2. Generate** | GPT-image-1 draws a tactile graphic candidate from the photo, guided by a BANA-grounded prompt (plain white background, continuous bold outlines, distinct texture fills, no text or logos, no invented elements). |
+| **3. Evaluate** | The evaluator panel scores the candidate on five defect dimensions. The UI shows the **ensemble verdict card** — issues flagged, ordered by priority, each with a suggested edit — with the full per-model decision table one click away. |
+| **4. Edit** | The top-priority suggestion pre-fills the edit box (naming the actual object, e.g. *"close the broken lines so every outline of the motorcycle is continuous"*). The user adjusts or rewrites it, picks which defect the edit targets, and applies. GPT-image-1 edits the image; the panel re-scores it. |
+| **5. Iterate** | Repeat inspect → edit until the image is right. Every step is logged: scores before and after, the instruction, the target defect, and whether the suggestion was accepted or rewritten. |
+| **6. Save** | The user reviews five defect checkboxes against the final image (the ground truth), and saves. One save writes the image pair, the final labels, and the full step-by-step trajectory. |
 
-| # | Dimension | Label | Description |
+The OpenAI API key is entered in the UI per session and never stored.
+
+---
+
+## 3. The judges: five models + one ensemble
+
+All five models answer the same five questions about a (photo, tactile) pair: **Too Thick? Broken Lines? Missing Parts? Missing Texture? Extra Parts?** Each answer is a probability.
+
+| Model | Backbone | Trainable part | Input → Output |
 |---|---|---|---|
-| 1 | **Too Thick** | QL | Lines or outlines rendered too thick; adjacent parts merge or fine detail collapses |
-| 2 | **Broken Lines** | QL | Continuous outlines appear broken or interrupted; fingertip encounters gaps |
-| 3 | **Missing Parts** | QP | A structural part visible in the reference photograph is absent from the tactile |
-| 4 | **Missing Texture** | QT | Surface texture needed to distinguish regions or materials is missing |
-| 5 | **Extra Parts** | QE | Tactile contains hallucinated elements not present in the reference photograph |
+| **CLIP Probe** | CLIP ViT-L/14 (frozen) | Per-dimension 2-layer MLP heads | 2 images → 768-d CLS each → concat **[nat \| tac] = 1536-d** → head → P(defect) |
+| **DINOv2 Probe** | DINOv2 ViT-L/14 (frozen) | Per-dimension 2-layer MLP heads | 2 images → 1024-d CLS each → **[nat \| tac \| nat−tac] = 3072-d** → head → P(defect) |
+| **ResNet-50** | Two-stream ResNet-50 | Entire network | 2 × (224×224×3) → 2048-d per stream → late fusion → sigmoid per dimension |
+| **ViT-B/16** | Two-stream ViT-B/16 | Entire network | 2 × (224×224×3) → 768-d per stream → late fusion → sigmoid per dimension |
+| **VLM** | Qwen2-VL-2B-Instruct | LoRA adapter (r=4, α=8) — **1.09 M of 2.21 B params (0.05%)**, vision encoder frozen | 2 images (≤200,704 px each) + a yes/no question per dimension → P("yes") from the yes/no token logits |
+| **Ensemble (weighted)** | — (derived) | — | Per dimension: each model votes at its own threshold; votes weighted by that model's per-dimension test F1; **flag if weighted vote share > 0.5**. Probability bar = weighted mean. |
 
-All labels: **1 = defect present**, 0 = absent.
+Training details shared by the probe / two-stream models: Asymmetric Loss (γ⁻ = 4.0; γ⁻ = 8.0 on the DINOv2 Missing-Texture head), per-dimension thresholds calibrated on the validation split. The VLM is fine-tuned on question-answer pairs built from the same splits; its Broken-Lines question was reworded to an outline-only definition (*"consider only the structural outlines, not texture fills…"*) after we found the earlier phrasing conflated texture with breakage.
 
----
-
-## Dataset
-
-| Property | Value |
-|---|---|
-| Total pairs | 987 natural–tactile image pairs |
-| Annotation | 100% human-annotated (two annotators + flight review, June 2026) |
-| Object categories | Animals, Food/Nature, Furniture, Tools, Vehicles, Wearables |
-| Reference-quality pairs | 37 pairs with all five defect options absent |
-| GPT-augmented pairs | +30 GPT-image-1 generated pairs (included in training) |
-
-| Split | Pairs | Option-centric records |
-|---|---|---|
-| Train | 718 + 30 GPT | 4,278 |
-| Val | 146 | 876 |
-| Test | 153 | 918 |
+Each checkpoint folder under `models/` carries a `TRAINING_RECIPE.txt` stating exactly what data trained it and its headline results.
 
 ---
 
-## Evaluator Models
+## 4. Training data
 
-Five models, all trained on the same `splits_v2` dataset:
-
-| Model | Architecture | Notes |
-|---|---|---|
-| **CLIP Probe** | Frozen CLIP ViT-L/14 + 4 two-layer MLP heads (QL/QP/QT/QE) | Language-aligned features; 768-d CLS → 1536-d [nat\|tac] |
-| **VLM** | Qwen2-VL-2B-Instruct + LoRA fine-tuning | Vision-language model; answers BANA-grounded yes/no questions |
-| **ResNet-50** | Two-stream ResNet-50; late fusion | Spatial features; separate encoders for natural and tactile |
-| **ViT-B/16** | Two-stream ViT-B/16; late fusion | Transformer features; separate encoders for natural and tactile |
-| **DINOv2 Probe** | Frozen DINOv2 ViT-L/14 + 4 two-layer MLP heads (QL/QP/QT/QE) | Self-supervised structural features; 1024-d CLS → 3072-d [nat\|tac\|nat−tac] |
-| **Ensemble (weighted)** | Derived pseudo-model over the five evaluators | Per-option weighted vote (weights ∝ per-option test F1, renormalised over selected models); flag when weighted vote share > 0.5; probability bar = weighted mean |
-
-All probe/two-stream models are trained with **Asymmetric Loss** (γ⁻=4.0; γ⁻=8.0 for the DINOv2 Missing Texture head to suppress false positives).
-
-Each model directory under `models/` carries a `TRAINING_RECIPE.txt` documenting the exact training data composition and headline results for that checkpoint.
+- **987 human-annotated pairs** across six object categories — every pair labeled by a human for all five defect dimensions.
+- **~120 GPT-generated pairs** (growing daily) collected through the pipeline itself, each with checkbox-verified final labels.
+- **Inferred labels from edit actions**: when the user targets a defect with an edit, the pre-edit image is labeled positive for that defect — the action itself is the label.
+- **A frozen GPT-domain holdout** (every 5th collected pair, never trained on) measures whether the models are actually learning the new domain.
 
 ---
 
-## Results
+## 5. Results
 
-Test set: **153 pairs**, balanced threshold t = 0.50. Models trained on splits_v2 augmented with 386 GPT-domain rows: 69 GPT-generated pairs (final checkbox-verified labels) plus 41 inferred positives from trajectory edit actions. A frozen 9-pair GPT-domain holdout (`gpt_test`, every 5th collected pair) is excluded from training.
+Deployed fleet: each model ships its best available checkpoint (per-model selection documented in `models/*/TRAINING_RECIPE.txt`). All numbers below are measured on this exact serving fleet at a uniform threshold t = 0.50.
 
-### F1 Score
+### Original test set (153 pairs) — F1 per dimension
 
-| Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Too Thick | 0.588 | 0.577 | 0.521 | 0.614 | **0.625** |
-| Broken Lines | 0.581 | **0.651** | 0.571 | 0.520 | 0.569 |
-| Missing Parts | 0.642 | 0.632 | 0.690 | 0.636 | **0.722** |
-| Missing Texture | 0.884 | **0.908** | 0.884 | 0.814 | 0.898 |
-| Extra Parts | 0.395 | **0.486** | 0.406 | 0.242 | 0.242 |
-| **Macro F1** | 0.618 | **0.651** | 0.614 | 0.565 | 0.611 |
+| Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe | Ensemble |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Too Thick | 0.591 | 0.393 | 0.515 | 0.549 | **0.622** | 0.593 |
+| Broken Lines | 0.620 | 0.634 | 0.571 | 0.607 | 0.556 | **0.661** |
+| Missing Parts | 0.626 | 0.614 | 0.690 | 0.686 | **0.722** | 0.699 |
+| Missing Texture | 0.887 | 0.861 | 0.884 | 0.838 | 0.884 | **0.897** |
+| Extra Parts | 0.432 | 0.270 | 0.406 | 0.290 | 0.405 | **0.457** |
+| **Macro F1** | 0.631 | 0.554 | 0.614 | 0.594 | 0.638 | **0.661** |
 
-### AUC (threshold-independent)
+### Original test set — AUC (threshold-independent)
 
-| Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Too Thick | 0.817 | 0.797 | 0.753 | **0.848** | 0.826 |
-| Broken Lines | 0.700 | **0.805** | 0.692 | 0.658 | 0.700 |
-| Missing Parts | 0.731 | 0.707 | 0.782 | **0.787** | 0.757 |
-| Missing Texture | **0.834** | 0.831 | 0.772 | 0.732 | 0.754 |
-| Extra Parts | **0.730** | 0.721 | 0.701 | 0.590 | 0.597 |
-| **Macro AUC** | 0.762 | **0.772** | 0.740 | 0.723 | 0.727 |
+| Dimension | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe | Ensemble |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Too Thick | 0.807 | 0.759 | 0.753 | 0.818 | 0.828 | **0.876** |
+| Broken Lines | 0.731 | **0.799** | 0.692 | 0.730 | 0.690 | 0.783 |
+| Missing Parts | 0.719 | 0.657 | 0.781 | 0.781 | 0.757 | **0.786** |
+| Missing Texture | **0.847** | 0.684 | 0.772 | 0.755 | 0.773 | 0.835 |
+| Extra Parts | 0.767 | 0.729 | 0.701 | 0.683 | 0.720 | **0.768** |
+| **Macro AUC** | 0.774 | 0.726 | 0.740 | 0.753 | 0.754 | **0.809** |
 
-### GPT-domain holdout (9 pairs, 45 flag decisions)
+**The weighted ensemble is the strongest judge overall** — best macro F1 (0.661) and best macro AUC (0.809), ahead of every individual model. Its weights are per-dimension F1 scores, so a model that is weak on a dimension automatically loses influence there.
 
-| | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Correct flags | 30/45 | **33/45** | 28/45 | 24/45 | 23/45 |
+*Note: the VLM column understates its practical performance — at a uniform t = 0.50 its conservative calibration hurts it, but the app's calibrated mode uses its per-dimension thresholds (0.05–0.25), where its F1 is substantially higher.*
 
-**Key findings:**
-- VLM leads macro F1 (0.651), macro AUC (0.772), and the GPT-domain holdout (33/45) — and improved the most from trajectory-collection data (GPT-domain false positives halved, 17 → 9)
-- Per-option specialisation motivates the weighted ensemble: DINOv2 leads Too Thick and Missing Parts; VLM leads Broken Lines, Missing Texture, and Extra Parts
-- Language supervision transfers the semantic Extra Parts dimension across rendering domains (CLIP 0.356 → 0.395, VLM 0.418 → 0.486) while vision-only models regressed on it (ResNet 0.536 → 0.406, DINOv2 0.411 → 0.242) — ensemble weighting compensates
-- The VLM's Broken Lines question was reworded to an outline-only definition at training time (see `models/vlm_checkpoint/TRAINING_RECIPE.txt`); dash/line texture fills still trigger false positives across models — the leading open failure mode
-- Missing Texture remains the highest-scoring dimension (F1 0.814–0.908), consistent with it being the most visually salient defect
-- Calibrated val-F1-max thresholds improve precision across all models (see `evaluators/constants.py`)
+### GPT-domain holdout (12 pairs, 60 flag decisions) — correct flags
 
----
+| | CLIP Probe | VLM | ResNet-50 | ViT-B/16 | DINOv2 Probe | Ensemble |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Correct / total | 36/60 | **45/60** | 35/60 | 31/60 | 26/60 | 37/60 |
 
-## Repository Structure
+*The holdout is heavily clean (4 positive labels of 60), so a judge that always answers "clean" would score 56/60 — read this table as a false-alarm measure. All models still over-flag generated images; the VLM over-flags least. Closing this gap is what the ongoing data collection is for.*
 
-```
-TactileExpert/
-├── app.py                        Gradio pipeline UI
-├── evaluators/
-│   ├── constants.py              ALL_OPTIONS, prompts, threshold sets, build_result()
-│   ├── clip_probe_eval.py        CLIP ViT-L/14 + 4 MLP heads
-│   ├── backbone_eval.py          ResNet-50 and ViT-B/16 two-stream evaluators
-│   ├── vlm_eval.py               Qwen2-VL-2B-Instruct + LoRA adapter
-│   └── dino_probe_eval.py        DINOv2 ViT-L/14 (frozen) + 4 MLP heads
-├── generation/
-│   └── gpt_generator.py          GPT-image-1 generate and edit wrappers
-├── models/                       Model checkpoints (not tracked in git)
-│   ├── clip_probe/               ql / qp / qt / qe _evaluator.pt
-│   ├── vlm_checkpoint/           LoRA adapter + tokenizer files
-│   ├── resnet50/                 resnet50_evaluator.pt
-│   ├── vit_b16/                  vit_b_16_evaluator.pt
-│   └── dino_probe/               ql / qp / qt / qe _evaluator.pt
-├── project_notes/                Research notes and to-do lists
-├── pipeline_diagram.png          Pipeline overview figure
-├── run_local.sh                  CPU-only launch script
-├── slurm/run_pipeline.sh         SLURM GPU job script
-└── requirements.txt
-```
+### Zero-shot baselines (why fine-tuning matters)
+
+We asked strong general-purpose models the same questions with **no training at all**, on 48 collected pairs (240 decisions; a trivial judge that always answers "clean" scores 226/240):
+
+| Zero-shot judge | Correct | False alarms |
+|---|:---:|:---:|
+| *always answer "clean"* | *226/240* | *0* |
+| CLIP ViT-L/14 (prompt matching) | 149/240 | 83 |
+| Qwen2-VL-7B (3.5× our VLM's size) | 119/240 | 114 |
+| Qwen2-VL-2B (same base as our VLM) | 51/240 | 188 |
+
+**Every zero-shot generalist scores far below the trivial baseline** — they raise alarms on nearly everything. After fine-tuning on our data, the *same* 2B model became the best judge in the fleet. Off-the-shelf models cannot do this task; domain training is what makes it work.
 
 ---
 
-## Setup
+## 6. What the data has taught us so far (open problems, honestly)
+
+- **Dashed textures get mistaken for broken lines.** A duck whose body is filled with neat rows of tactile dashes — good design — sets off the "broken lines" alarm in most models. They learned "many short line fragments ≈ broken" instead of "gaps in the outline ≈ broken". Rewording the question at inference time made it *worse* (telling a model to ignore dashes makes it stare at the dashes); retraining with the corrected definition helps but hasn't fully fixed it.
+- **Real outline gaps sometimes get missed** by the same models that over-flag textures — the concept is genuinely mislearned, not just miscalibrated. Fixing it needs contrast examples: textured-but-clean images labeled clean, genuinely-broken images labeled broken. Our collection produces exactly these.
+- **"Extra parts" is a meaning question, not a pixels question.** Whether a shape *belongs* depends on knowing what the object is. The two language-aware models (CLIP, VLM) improved on it after retraining; the three pure-vision models got worse. Language supervision seems to carry semantic defect concepts across drawing styles.
+- **Evaluators over-flag any new drawing style until they've seen it.** On newly collected GPT-style images, over a third of all flags initially disagreed with the human — almost all false alarms. One retrain cut the best model's false alarms nearly in half. The gap is data, not architecture.
+
+---
+
+## 7. Ongoing work — the reinforcement-learning story
+
+Every session in the pipeline quietly produces the three ingredients of reinforcement learning:
+
+- **State** — the current image pair and its evaluator scores.
+- **Action** — the edit instruction the human actually gave, plus which defect it targeted.
+- **Reward** — how much the defect scores improved after the edit.
+
+On top of the final labels, we log two kinds of *disagreement*, and each one trains a different part of the system:
+
+1. **Human vs. evaluators** (corrected checkboxes) → retrains the evaluators. They are our *reward model*, and the human keeps them honest.
+2. **Human vs. suggestion** (the pre-filled edit vs. what the user actually typed) → preference pairs for training an *edit policy* — a model that learns to write the right edit instruction itself. Suggested-but-rejected = worse; human-written = better. This is exactly the data format DPO (Direct Preference Optimization) trains on.
+
+The flywheel: human corrections → better evaluators → better suggestions → richer trajectories → an edit policy that needs fewer human corrections. The long-term goal is a system that iterates to a clean tactile graphic on its own, with the human only auditing.
+
+**Next steps:** finish the 150-pair collection target · re-derive ensemble weights from live GPT-domain accuracy (the ensemble currently weights by original-domain F1, and live data shows the VLM deserves more weight on generated images) · fine-tune the 7B VLM with the same recipe · behavior-clone the edit policy from logged instructions, then DPO on the preference pairs.
+
+---
+
+## 8. Using the UI
+
+### Start
 
 ```bash
-pip install -r requirements.txt
+sbatch slurm/run_pipeline.sh          # GPU (recommended)
+tail -f logs/pipeline_<jobid>.out     # → open the gradio.live URL
+bash run_local.sh                     # CPU-only fallback
 ```
 
-Model checkpoints are not tracked in git. Place them under `models/` following the structure above. DINOv2 ViT-L/14 backbone weights are downloaded automatically via `torch.hub` on first run.
-
-The VLM requires `Qwen/Qwen2-VL-2B-Instruct` from HuggingFace (set `HF_HOME` to a local cache directory).
-
-### Running
-
-```bash
-# GPU (recommended for VLM inference)
-sbatch slurm/run_pipeline.sh
-# → follow the gradio.live public URL printed in the job log
-
-# CPU-only (for testing / Eval-only mode)
-bash run_local.sh
-```
-
----
-
-## Using the UI
-
-### First-time setup per session
-
-1. Start the app (`sbatch slurm/run_pipeline.sh` on GPU, or `bash run_local.sh` for CPU testing)
-2. Find the `gradio.live` public URL in the job log: `tail -f logs/pipeline_<jobid>.out`
-3. Open the URL in any browser — no SSH tunnel needed
-
-### Left panel — controls
+### Controls (left panel)
 
 | Control | What it does |
 |---|---|
-| **Mode** radio | Switch between *Full pipeline* (generate + evaluate + edit) and *Eval only* (upload any existing tactile and evaluate it) |
-| **Natural reference photograph** | Upload your natural image — CLIP auto-detects the object and fills the object name field |
-| **Object name** | Confirm or correct the detected name — this drives the BANA prompt |
-| **BANA prompt** | Auto-generated from the object name; fully editable before generation |
-| **OpenAI API key** | Entered per session, never stored |
-| **Generate tactile graphic** | Calls GPT-image-1 with the reference photo + prompt, then runs all selected evaluators |
-| **Run evaluators** checkboxes | Select which of the 5 models to run (all 5 recommended when saving for training) |
-| **Pre-fill edit instruction from** | Which model's verdict drives the suggested edit text |
-| **Edit instruction** | Auto-filled from the trusted model's top flagged issue — edit freely before applying |
-| **Defect being addressed** | Dropdown: which defect this edit targets — auto-filled, change if you're overriding the model |
-| **Apply edit** | Sends the instruction to GPT-image-1, re-evaluates, appends a new iteration |
-| **Re-evaluate current image** *(right panel)* | Re-runs evaluators on the current image without a new GPT call — useful when switching models mid-session |
+| **Mode** radio | *Full pipeline* (generate + evaluate + edit) or *Eval only* (upload an existing tactile) |
+| **Natural reference photograph** | CLIP auto-detects the object and fills the name field |
+| **Object name** | Confirm/correct — drives the BANA prompt *and* the object-grounded edit suggestions |
+| **OpenAI API key** | Per session, never stored |
+| **Run evaluators** | Which models to run (keep all 5 + Ensemble when saving for training) |
+| **Pre-fill edit instruction from** | Which judge's verdict drives the suggestion (default: Ensemble) |
+| **Combine all flagged issues in pre-fill** | Off by default — one targeted edit at a time; on = numbered list of every flagged issue |
+| **Defect being addressed** | Which defect this edit targets — auto-filled, **change it whenever you override the suggestion** |
+| **Re-evaluate current image** | Re-score without a new GPT call |
 
-### Right panel — results
+### Results (right panel)
 
-- **Evaluation table** — per-option probability bars for every selected model, with a consensus column
-- **Iteration Gallery** — thumbnails of natural reference + every tactile iteration; click to expand
-- **Edit Log** — every instruction you applied, plus the compressed context sent to the next API call
-- **Save to Training** — approve the final image, correct the defect checkboxes, save
+- **Ensemble verdict card** — issues by priority with suggested edits; expand *"Show full per-model decision table"* for every model's probability bars and the consensus column
+- **Iteration gallery + edit log** — every version and every instruction
+- **Save to Training** — review every checkbox against the image (your eyes are ground truth), save once
 
-### Typical session flow
+### Per-image flow
 
 ```
-Upload natural image
-  → CLIP auto-detects object → confirm name
-  → Generate tactile graphic
-  → Inspect image visually (ignore scores first — form your own opinion)
-  → If defects visible:
-      Adjust "Defect being addressed" dropdown if needed
-      Edit instruction → Apply edit
-      Repeat 2-4 times
-  → Save to Training tab
-      Review EVERY checkbox against the actual image
-      Correct any wrong pre-fills
-      Save
-  → Reset session → next image
+Upload photo → confirm name → Generate
+  → look at the IMAGE first, scores second
+  → edit 2–4 times (one defect per edit; flip the dropdown when overriding)
+  → Save to Training: verify every checkbox → Save → Reset → next image
 ```
 
 ---
 
-## Ongoing Experiments
+## 9. Repository structure
 
-### Motivation
+```
+TactileExpert/
+├── app.py                        Gradio pipeline UI (ensemble card, trajectory logging)
+├── evaluators/
+│   ├── constants.py              options, questions, thresholds, ensemble weights + rules
+│   ├── clip_probe_eval.py        CLIP ViT-L/14 probe
+│   ├── dino_probe_eval.py        DINOv2 ViT-L/14 probe
+│   ├── backbone_eval.py          ResNet-50 / ViT-B/16 two-stream
+│   └── vlm_eval.py               Qwen2-VL-2B + LoRA
+├── generation/gpt_generator.py   GPT-image-1 generate/edit wrappers (BANA prompt)
+├── models/                       checkpoints (untracked) + TRAINING_RECIPE.txt per model
+├── generated_training_data/      annotations.jsonl · trajectories.jsonl · pair folders (untracked)
+├── pipeline_diagram.png
+├── slurm/run_pipeline.sh         GPU job script
+└── run_local.sh                  CPU-only launch
+```
 
-Each time a human annotator uses the pipeline, they generate more than a final approved image — they generate a *trajectory*: a sequence of generate → evaluate → edit steps, where each step records what was tried, which defects were flagged, what instruction was given, and whether the edit helped. Accumulating these trajectories enables two things beyond standard supervised retraining:
-
-1. **Reward-guided edit policy** — the evaluator score improvement at each step is a dense reward signal. A lightweight language model can be trained on these trajectories to generate edit instructions automatically, replacing the human in the loop at inference time and enabling fully automated iterative refinement.
-
-2. **Reward model improvement** — whenever the human corrects the evaluator's pre-filled labels before saving, that correction is logged separately (`evaluator_flags` vs `human_labels`). These disagreements are training signal for the evaluators themselves, making the reward signal more reliable over time.
-
-The goal is a self-improving flywheel: human corrections retrain the evaluators → better evaluators produce better rewards → better rewards train a stronger edit policy → stronger policy reaches all-clear in fewer iterations → less human effort per image.
-
-### Data collection loop
-
-Follow these steps each session. Each completed save produces one trajectory record used for both evaluator retraining and edit policy training.
-
-**Before starting**
-- Confirm the pipeline app is running (`tail -f logs/pipeline_<jobid>.out` for the gradio.live URL)
-- Have a folder of natural reference images ready
-
-**Per image — repeat for each natural image**
-
-| Step | Action | Notes |
-|---|---|---|
-| 1 | Upload the natural reference photo | CLIP auto-detects the object; confirm or correct the name |
-| 2 | Select **all 5 evaluators** in the sidebar | Running all models gives the best annotation coverage — defects missed by one model may be caught by another |
-| 3 | Set the trusted model to whichever you trust most for this image type | DINOv2 or VLM are good defaults |
-| 4 | Click **Generate tactile graphic** | Wait for generation + evaluation to complete |
-| 5 | Inspect the result carefully — look at the image directly, not just the model scores | Models are imperfect; your visual judgment is ground truth |
-| 6 | If defects are visible: review the pre-filled edit instruction, adjust if needed, click **Apply edit** | Aim for targeted single-issue instructions ("thin the strokes" not "fix everything") |
-| 7 | Repeat steps 5–6 for **2–4 edit iterations** — don't stop at the first acceptable output | More iterations = richer trajectory = more (state, action, reward) training pairs |
-| 8 | When satisfied, go to the **Save to Training** tab | |
-| 9 | **Review every checkbox manually** against the actual image — do not blindly accept the pre-fill | This is the most important step: your corrections here are the ground truth labels and the signal for detecting evaluator errors |
-| 10 | Click **Save to training data** | Saves the final pair to `annotations.jsonl` and the full trajectory to `trajectories.jsonl` |
-
-**After each batch of ~10–20 images**
-- Check `generated_training_data/annotations.jsonl` line count — confirm saves are landing
-- Check `generated_training_data/trajectories.jsonl` — confirm trajectories have multiple steps and non-null rewards
-- Note any consistent evaluator errors (same model repeatedly wrong on same defect type) — flag for threshold or retraining
-
-### Current targets
-
-| Milestone | Status |
-|---|---|
-| 30 GPT-generated pairs collected and annotated | ✅ Done |
-| All 5 models retrained with GPT-augmented data | ✅ Done (Jul 2026) |
-| 150 pairs collected — sufficient for edit policy training | 🔄 In progress |
-| Evaluator retraining pass 2 (GPT-only baseline) | ⬜ Pending |
-| Evaluator retraining pass 3 (full combined dataset) | ⬜ Pending |
-| Edit policy training (supervised cloning on trajectories) | ⬜ Pending |
-| Edit policy improvement via DPO (preference pairs) | ⬜ Pending |
+Setup: `pip install -r requirements.txt`; checkpoints go under `models/`; the VLM base model downloads from HuggingFace (`Qwen/Qwen2-VL-2B-Instruct`, set `HF_HOME`).
 
 ---
 
 ## Citation
-
-If you use TactileExpert or the annotated dataset in your work, please cite:
 
 ```bibtex
 @misc{tactileexpert2026,
