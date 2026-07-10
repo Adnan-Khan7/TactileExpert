@@ -206,6 +206,3 @@ TactileExpert/
 
 Setup: `pip install -r requirements.txt`; checkpoints go under `models/`; the VLM base model downloads from HuggingFace (`Qwen/Qwen2-VL-2B-Instruct`, set `HF_HOME`).
 
----
-
-## Citation
