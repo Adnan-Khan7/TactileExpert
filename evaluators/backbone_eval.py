@@ -1,7 +1,7 @@
 """ResNet-50 and ViT-B/16 two-stream evaluators for TactileExpert.
 
-Both share the same architecture (backbone + 5 task heads) and the same
-wrapper class — only the checkpoint path differs.
+Both share the same architecture (backbone + 4 task heads covering the
+5 options) and the same wrapper class — only the checkpoint path differs.
 """
 
 from pathlib import Path
@@ -24,9 +24,9 @@ TASK_HEADS = {
     "QP": ["missing_parts"],
     "QT": ["missing_texture"],
     "QE": ["extra_parts"],
-    "QN": ["non_conformant"],
 }
-HEAD_ORDER = ["QL", "QP", "QT", "QE", "QN"]
+# Concatenation order of head outputs — must expand to exactly ALL_OPTIONS.
+HEAD_ORDER = ["QL", "QP", "QT", "QE"]
 
 _TRANSFORM = T.Compose([
     T.Resize(256),
@@ -98,7 +98,11 @@ class BackboneEvaluator:
         print(f"[{backbone_name}] Loading from {ckpt_path.name}…")
         ckpt  = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         model = _build_model(backbone_name)
-        model.load_state_dict(ckpt["state_dict"])
+        # v2/v3 checkpoints carry a QN (non_conformant) head — option removed
+        # from the taxonomy, so its weights are dropped here.
+        state = {k: v for k, v in ckpt["state_dict"].items()
+                 if not k.startswith("heads.QN")}
+        model.load_state_dict(state)
         model.eval().to(self.device)
         self._model = model
         print(f"[{backbone_name}] Ready.")

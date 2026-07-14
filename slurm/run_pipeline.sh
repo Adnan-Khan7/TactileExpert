@@ -41,10 +41,8 @@ python -u app.py \
 echo "Finished: $(date)"
 
 # ============================================================
-# To access the interface from your laptop:
+# To access the interface: app.py runs with --share by default,
+# so open the gradio.live URL printed in logs/pipeline_<jobid>.out
 #
-#   ssh -L 7860:<nodename>:7860 nibi
-#
-# Replace <nodename> with the value printed above (e.g. g1).
-# Then open http://localhost:7860 in your browser.
+#   grep -m1 "gradio.live" logs/pipeline_<jobid>.out
 # ============================================================

@@ -45,7 +45,6 @@ class CLIPProbeEvaluator:
         ("QP", "qp_evaluator.pt", ["missing_parts"]),
         ("QT", "qt_evaluator.pt", ["missing_texture"]),
         ("QE", "qe_evaluator.pt", ["extra_parts"]),
-        ("QN", "qn_evaluator.pt", ["non_conformant"]),
     ]
 
     def __init__(
@@ -86,7 +85,6 @@ class CLIPProbeEvaluator:
 
         # Precompute text embeddings for zero-shot object classification.
         # Uses the same CLIP backbone — no extra model or download.
-        import open_clip
         tokenizer = open_clip.get_tokenizer("ViT-L-14")
         prompts   = [f"a photo of a {c}" for c in OBJECT_CATEGORIES]
         with torch.no_grad():

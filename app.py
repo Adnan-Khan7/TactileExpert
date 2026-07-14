@@ -1070,9 +1070,9 @@ def main():
         def on_nat_upload(pil):
             """Classify the uploaded natural image and prefill the object name.
 
-            Only runs if CLIP is already in memory (i.e. from a prior session
-            action that triggered lazy-loading).  If not yet loaded the field
-            is left blank — the user fills it manually.
+            CLIP is loaded eagerly at startup, so this runs on every upload.
+            On any classification error the field is left blank — the user
+            fills it manually.
             """
             if pil is None:
                 return gr.update(value=""), gr.update(visible=False)
