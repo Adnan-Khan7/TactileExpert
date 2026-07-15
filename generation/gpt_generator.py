@@ -190,8 +190,11 @@ def edit_tactile(
             "embossing on swell paper; the second image is the natural reference "
             f"photograph of the same {subject}. Edit the FIRST image only. Use "
             f"the reference photograph to verify the {subject}'s shapes, parts, "
-            "and surface regions. Apply the following correction while "
-            f"preserving all other features: {edit_instruction}"
+            "and surface regions — but ignore the photograph's background, "
+            "scenery, and surroundings entirely: the tactile graphic must show "
+            f"only the {subject} on a plain white background. Apply the "
+            "following correction while preserving all other features: "
+            f"{edit_instruction}"
         )
     else:
         prompt = (
