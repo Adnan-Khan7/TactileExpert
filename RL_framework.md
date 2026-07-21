@@ -1,18 +1,10 @@
 # The RL-Inspired Framework of TactileExpert — Reference Notes
 
-*Prepared July 2026 as (a) a plain-language primer for a reader new to
-reinforcement learning, and (b) speaker notes / Q&A backup for the Chapter 5
-proposal presentation. Everything here is grounded in the deployed
-TactileExpert system; numbers marked "current" are from live logs and should
-be refreshed before the meeting.*
-
-> **Location note:** this file lives in `project_notes/`, which is gitignored
-> (local planning material, like the thesis draft). Move it if you want it
-> tracked.
+*Reinforcment Learning Inspiration for TactileExpert.*
 
 ---
 
-## 0. How to use this document
+## 0. About this document
 
 - **Section 1** is the 90-second pitch — read it first; it's what you say out loud.
 - **Section 2** is a gentle RL primer, every concept tied to *our* system.
