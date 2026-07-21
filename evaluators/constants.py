@@ -62,33 +62,44 @@ QUESTIONS = {
 
 # Templates say "the object"; the app substitutes the known object name at
 # prefill time ("the object" → "the giraffe"), so keep that exact wording.
-# Phrasing mirrors the collected human edit instructions (targeted, imperative,
-# names the failure and the fix) so the pre-fill needs minimal editing.
-# NEVER mention the reference photograph in these instructions (July 14,
-# user intent from collected edits): the natural photo can contain background
-# noise/scenery, and pointing the edit model at it invites reproducing that —
-# the tactile graphic must stay subject-only on plain white.
+# Phrasing is formalized from the collected human edit instructions (114 pairs
+# as of July 20): targeted, imperative, names the failure and the fix, and
+# carries the recurring register the annotator uses ("reliable tactile
+# recognition", "minimalism", distinct/consistent, depth conveyed through
+# touch) so the pre-fill needs minimal editing.
+# NEVER mention the reference photograph in these instructions (user intent):
+# the natural photo can contain background noise/scenery, and pointing the
+# edit model at it invites reproducing that — the tactile graphic must stay
+# subject-only on plain white.
 EDIT_INSTRUCTIONS = {
     "broken_lines": (
-        "Close the broken lines so every outline of the object is continuous — "
-        "each element should read as one solid, unbroken line under a fingertip."
+        "Close every broken or discontinuous outline of the object so each "
+        "element reads as one solid, continuous closed line under a fingertip, "
+        "and remove any leftover or incomplete line fragments — continuity and "
+        "minimalism are essential for reliable tactile recognition."
     ),
     "too_thick": (
-        "Reduce the line thickness of the object so adjacent elements stay "
-        "separate and do not merge or collide."
+        "Reduce the line thickness of the object and add spacing between "
+        "adjacent lines so that no elements merge or collide — minimalism and "
+        "clear separation are essential for reliable tactile recognition."
     ),
     "missing_texture": (
-        "Texture each element of the object with its own distinct pattern, "
-        "kept consistent within that element — adjacent parts and parts at "
-        "different depths must not share the same texture."
+        "Give each distinct part of the object its own tactile texture, kept "
+        "uniform within that part; adjacent parts, and parts at different "
+        "depths, must use different patterns so that separation and depth are "
+        "conveyed through touch — a core requirement for reliable tactile "
+        "recognition."
     ),
     "missing_parts": (
-        "Add the missing parts of the object so its structure is complete — "
-        "every structural element present and clearly outlined."
+        "Add the missing structural parts of the object so it is complete and "
+        "recognizable — every essential element present and clearly outlined "
+        "for reliable tactile recognition."
     ),
     "extra_parts": (
-        "Remove the extra elements that do not belong to the object, leaving "
-        "only the object itself with clean lines."
+        "Remove everything that does not belong to the object itself — "
+        "background, ground, added borders, people, text or logos, and stray "
+        "or clutter lines — leaving only the object with clean, minimal lines "
+        "for reliable tactile recognition."
     ),
 }
 
