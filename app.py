@@ -230,8 +230,12 @@ def _eval_table(model_results: dict, mode: str) -> str:
     return table
 
 
-def _ensemble_card(mr: dict, mode: str) -> str:
-    """Default simplified view: ensemble verdict + suggested edits by priority."""
+def _ensemble_card(mr: dict, mode: str, obj: str = "") -> str:
+    """Default simplified view: ensemble verdict + suggested edits by priority.
+
+    obj: known object name — substituted into the displayed suggestions so
+    text copied from the card matches the edit-box prefill convention.
+    """
     if ENSEMBLE_NAME not in mr:
         return ""
     res = mr[ENSEMBLE_NAME]
@@ -248,13 +252,16 @@ def _ensemble_card(mr: dict, mode: str) -> str:
         items = []
         for i, o in enumerate(flagged):
             d = res["options"][o]
+            inst = d["edit_instruction"] or ""
+            if obj:
+                inst = inst.replace("the object", f"the {obj}")
             items.append(
                 f"<div style='margin:7px 0;padding:8px 10px;background:#fdf6f6;"
                 f"border-left:3px solid #e74c3c;border-radius:4px'>"
                 f"<span style='font-weight:700;font-size:13px'>{i+1}. {OPTION_DISPLAY[o]}</span>"
                 f"<span style='font-size:11px;color:#888'> &nbsp;{d['n_agree']}/{d['n_models']} models agree · "
                 f"vote {d['vote_share']:.0%} · mean p {d['prob_yes']:.2f}</span><br>"
-                f"<span style='font-size:12px;color:#444'>{d['edit_instruction']}</span>"
+                f"<span style='font-size:12px;color:#444'>{inst}</span>"
                 f"</div>")
         body = "".join(items)
     clean = [OPTION_DISPLAY[o] for o in ALL_OPTIONS
@@ -268,10 +275,10 @@ def _ensemble_card(mr: dict, mode: str) -> str:
             f"{verdict}{body}{clean_line}</div>")
 
 
-def _eval_view(mr: dict, mode: str) -> str:
+def _eval_view(mr: dict, mode: str, obj: str = "") -> str:
     """Ensemble card up front; full per-model decision table behind a toggle."""
     table = _eval_table(mr, mode)
-    card = _ensemble_card(mr, mode)
+    card = _ensemble_card(mr, mode, obj)
     if not card:
         return table
     return (card +
@@ -528,6 +535,7 @@ def main():
             )
         it = _state[-1]
         mr = _get_results(it, mode, selected)
+        obj = (it.get("object") or "").strip()
 
         # All-model-results list for badge strip
         mr_list = [_get_results(s, mode, selected) for s in _state]
@@ -556,14 +564,13 @@ def main():
             top_option = flagged_opts[0] if flagged_opts else None
 
         # Ground generic template wording in the known object name
-        obj = (it.get("object") or "").strip()
         if prefill and obj:
             prefill = prefill.replace("the object", f"the {obj}")
         _prefill_ctx["text"]    = prefill
         _prefill_ctx["trusted"] = trusted_model or ""
 
         return (
-            _eval_view(mr, mode),
+            _eval_view(mr, mode, obj),
             gr.update(value=_all_clear_html() if all_clear else "",
                       visible=all_clear),
             _iteration_strip(_state, mr_list),
@@ -689,6 +696,26 @@ def main():
         tbl, clear, strip, log, gallery, prefill, top_opt = _render(
             mode_lbl, selected_models, trusted_model, combine_all)
         return tbl, clear, strip, log, gallery, prefill, top_opt
+
+    def on_target_pick(target_option, mode_lbl, selected_models, trusted_model):
+        """User manually picked the defect to address: re-prefill the edit box
+        with that defect's template (object-grounded), so a non-top-priority
+        target no longer requires copy-pasting from the ensemble card."""
+        if not _state or not target_option or target_option == "multiple":
+            return gr.update()
+        it = _state[-1]
+        prefill = EDIT_INSTRUCTIONS.get(target_option, "")
+        obj = (it.get("object") or "").strip()
+        if prefill and obj:
+            prefill = prefill.replace("the object", f"the {obj}")
+        # Attribute the suggestion to the trusted judge only if it actually
+        # flagged this option; otherwise it's a manual template pick.
+        mr = _get_results(it, _mode(mode_lbl), selected_models)
+        tm = trusted_model if (trusted_model in mr and
+                               target_option in mr[trusted_model]["flagged"]) else ""
+        _prefill_ctx["text"] = prefill
+        _prefill_ctx["trusted"] = tm
+        return gr.update(value=prefill)
 
     def on_reeval(mode_lbl, selected_models, trusted_model, combine_all):
         if not _state:
@@ -1042,6 +1069,14 @@ def main():
                 inputs=[mode_radio, model_select, trusted_radio, combine_cb],
                 outputs=_view_outputs,
             )
+
+        # .input (not .change): fires only on USER picks, so _render's
+        # programmatic top-option updates don't overwrite the prefill.
+        target_dropdown.input(
+            fn=on_target_pick,
+            inputs=[target_dropdown, mode_radio, model_select, trusted_radio],
+            outputs=edit_box,
+        )
 
         reeval_btn.click(
             fn=on_reeval,
