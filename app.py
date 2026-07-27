@@ -407,7 +407,7 @@ def _get_results(it: dict, mode: str, selected: list[str]) -> dict:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", default="Qwen/Qwen2-VL-2B-Instruct")
+    parser.add_argument("--model-path", default="Qwen/Qwen2-VL-7B-Instruct")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true", default=True)
     parser.add_argument("--no-share", dest="share", action="store_false")

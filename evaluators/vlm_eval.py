@@ -17,7 +17,7 @@ class VLMEvaluator:
 
     def __init__(
         self,
-        model_path: str = "Qwen/Qwen2-VL-2B-Instruct",
+        model_path: str = "Qwen/Qwen2-VL-7B-Instruct",
         lora_checkpoint: str | Path | None = None,
         device: str | None = None,
         max_pixels: int = 200704,

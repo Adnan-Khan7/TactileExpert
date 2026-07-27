@@ -35,7 +35,7 @@ mkdir -p logs
 PORT=7860
 
 python -u app.py \
-    --model-path Qwen/Qwen2-VL-2B-Instruct \
+    --model-path Qwen/Qwen2-VL-7B-Instruct \
     --port $PORT
 
 echo "Finished: $(date)"
