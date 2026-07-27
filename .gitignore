@@ -14,8 +14,11 @@ logs/
 *.log
 
 # Large data files / model weights
+# NOTE: these are ROOT-ANCHORED on purpose. A bare `models/` also matches
+# research/models/, which is Python source the review/ and ui/ stacks import —
+# an unanchored pattern silently drops it from a clone.
 images/
-models/
+/models/
 *.jsonl
 *.xlsx
 *.csv
@@ -39,4 +42,14 @@ project_notes/
 
 # Generated training pairs (local data — images + annotations)
 generated_training_data/
+
+# The research workspace itself is NEVER part of this repo. research/ holds
+# only scripts; the corpus, splits, checkpoints and experiment outputs live at
+# $TACTILE_DATA_ROOT (default ~/vlm_finetune) and are partly consent-restricted
+# (AMT/CUREB). Belt-and-braces in case a symlink or copy lands here.
+vlm_finetune/
+TactileEval_Context_And_Data/
+research/**/data/
+research/**/images/
+research/**/experiments_out/
 

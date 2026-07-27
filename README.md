@@ -190,13 +190,21 @@ Upload photo → confirm name → Generate
 ```
 TactileExpert/
 ├── app.py                        Gradio pipeline UI (ensemble card, trajectory logging)
-├── evaluators/
+├── evaluators/                   ── the deployed fleet ──────────────────────
 │   ├── constants.py              options, questions, thresholds, ensemble weights + rules
 │   ├── clip_probe_eval.py        CLIP ViT-L/14 probe
 │   ├── dino_probe_eval.py        DINOv2 ViT-L/14 probe
 │   ├── backbone_eval.py          ResNet-50 / ViT-B/16 two-stream
-│   └── vlm_eval.py               Qwen2-VL-2B + LoRA
+│   └── vlm_eval.py               Qwen2-VL-7B + LoRA
 ├── generation/gpt_generator.py   GPT-image-1 generate/edit wrappers (BANA prompt)
+├── research/                     ── training / eval / experiments ───────────
+│   ├── _paths.py                 REPO_ROOT + DATA_ROOT resolution (see below)
+│   ├── baselines/                CLIP · DINOv2 · ResNet · ViT probe training
+│   ├── vlm/                      VQA dataset build + Qwen2-VL LoRA fine-tuning
+│   ├── experiments/              deploy gates, ensemble weights, calibration
+│   ├── policy/                   BC / DPO edit-policy data extraction
+│   ├── annotator/                labelling tool + split builder
+│   └── review/, ui/, models/     earlier review + demo stack
 ├── models/                       checkpoints (untracked) + TRAINING_RECIPE.txt per model
 ├── generated_training_data/      annotations.jsonl · trajectories.jsonl · pair folders (untracked)
 ├── pipeline_diagram.png
@@ -204,5 +212,13 @@ TactileExpert/
 └── run_local.sh                  CPU-only launch
 ```
 
-Setup: `pip install -r requirements.txt`; checkpoints go under `models/`; the VLM base model downloads from HuggingFace (`Qwen/Qwen2-VL-2B-Instruct`, set `HF_HOME`).
+**Code lives here; the corpus does not.** `research/` scripts read and write a
+research workspace — image corpus, splits, checkpoints, experiment outputs —
+that is deliberately outside the repo: it is large, and the human annotations
+are consent-restricted. Its location comes from `TACTILE_DATA_ROOT`
+(default `~/vlm_finetune`), resolved in `research/_paths.py`. Nothing under
+`research/` hardcodes a home directory, so the same scripts run unchanged
+against a mounted volume in a container. See [research/README.md](research/README.md).
+
+Setup: `pip install -r requirements.txt`; checkpoints go under `models/`; the VLM base model downloads from HuggingFace (`Qwen/Qwen2-VL-7B-Instruct`, set `HF_HOME`).
 

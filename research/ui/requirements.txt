@@ -1,0 +1,3 @@
+# Install from Alliance local wheel repo: pip install --no-index gradio
+# All other deps are already in the training venv.
+gradio==5.49.1
