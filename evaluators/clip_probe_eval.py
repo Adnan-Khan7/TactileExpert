@@ -79,8 +79,13 @@ class CLIPProbeEvaluator:
             head.load_state_dict(ckpt["state_dict"])
             head.eval().to(self.device)
             self._heads[_dim] = (head, options)
-            # Prefer thresholds stored in the checkpoint over defaults
-            for opt, t in ckpt.get("calibrated_thresholds", {}).items():
+            # Prefer thresholds stored in the checkpoint over defaults.
+            # Key name differs by training-script vintage: v5 checkpoints write
+            # "cal_thresholds" (matching the DINOv2 probe), older ones wrote
+            # "calibrated_thresholds". Reading only the latter silently fell
+            # back to the stale module defaults.
+            stored = ckpt.get("cal_thresholds") or ckpt.get("calibrated_thresholds") or {}
+            for opt, t in stored.items():
                 self.calibrated_thresholds[opt] = t
 
         # Precompute text embeddings for zero-shot object classification.

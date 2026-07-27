@@ -974,10 +974,18 @@ def main():
                 gr.Markdown("### Current candidate")
                 tac_out = gr.Image(label="Latest tactile graphic", height=280)
 
+                # Calibrated mode is withheld, not removed: every per-model
+                # threshold set predates the current fleet (VLM thresholds are
+                # Qwen2-VL-2B v3's, applied to the 7B, which was gated at
+                # t=0.50; ResNet/ViT carry June v2 values against v5 weights).
+                # Re-enable by restoring list(MODE_LABELS.keys()) once
+                # thresholds are recalibrated for v5+7B.
                 mode_radio = gr.Radio(
-                    choices=list(MODE_LABELS.keys()),
+                    choices=[DEFAULT_MODE_LBL],
                     value=DEFAULT_MODE_LBL,
                     label="Decision thresholds",
+                    info="Calibrated mode is disabled — its thresholds predate "
+                         "the v5 + Qwen2-VL-7B fleet and would mis-flag.",
                 )
 
                 gr.Markdown("### Evaluation — all models")
@@ -1035,14 +1043,14 @@ def main():
                         strip_html, edit_log_html, iter_gallery, edit_box,
                         target_dropdown, err_box]
 
-        gen_btn.click(
+        _gen_evt = gen_btn.click(
             fn=on_generate,
             inputs=[nat_img, object_desc, prompt_box, api_key,
                     mode_radio, model_select, trusted_radio, combine_cb],
             outputs=_gen_outputs,
         )
 
-        eval_btn.click(
+        _eval_evt = eval_btn.click(
             fn=on_eval_upload,
             inputs=[nat_img, tac_upload, object_desc, mode_radio, model_select,
                     trusted_radio, combine_cb],
@@ -1053,7 +1061,7 @@ def main():
                          strip_html, edit_log_html, iter_gallery, edit_box,
                          target_dropdown, err_box]
 
-        edit_btn.click(
+        _edit_evt = edit_btn.click(
             fn=on_edit,
             inputs=[edit_box, target_dropdown, api_key, include_nat_cb, use_context_cb,
                     mode_radio, model_select, trusted_radio, combine_cb],
@@ -1078,7 +1086,7 @@ def main():
             outputs=edit_box,
         )
 
-        reeval_btn.click(
+        _reeval_evt = reeval_btn.click(
             fn=on_reeval,
             inputs=[mode_radio, model_select, trusted_radio, combine_cb],
             outputs=_gen_outputs,
@@ -1151,16 +1159,21 @@ def main():
             )
             return gr.update(value=flagged)
 
-        # Pre-fill save labels when switching to Save tab or after any eval
         save_btn.click(
             fn=on_save_to_train,
             inputs=[save_labels, mode_radio, model_select],
             outputs=save_status,
         )
 
-        # Prefill save labels whenever eval runs
-        for btn in (gen_btn, eval_btn, edit_btn, reeval_btn):
-            btn.click(
+        # Prefill save labels whenever eval runs.
+        # MUST be .then() off each handler's event, never a second .click() on
+        # the same button: separate listeners on one trigger run as independent
+        # events, so this (instant) one finished before the generate/edit call
+        # (~30 s) had appended the new iteration — prefilling the defect
+        # checkboxes from the PREVIOUS iteration, which then get written to
+        # annotations.jsonl as human_labels if the user doesn't catch it.
+        for _evt in (_gen_evt, _eval_evt, _edit_evt, _reeval_evt):
+            _evt.then(
                 fn=_prefill_save_labels,
                 inputs=[mode_radio, model_select],
                 outputs=save_labels,

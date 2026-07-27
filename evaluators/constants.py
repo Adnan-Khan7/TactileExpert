@@ -112,9 +112,20 @@ SYSTEM_PROMPT = (
 )
 
 # ── Threshold configuration ────────────────────────────────────────────────────
-# Two modes available in the UI:
+# Two modes exist in code:
 #   balanced   — fixed t = 0.50 for every option (all-clear state reachable)
-#   calibrated — per-option val-F1-maximising thresholds (June 2026 retraining)
+#   calibrated — per-option val-F1-maximising thresholds
+#
+# !! CALIBRATED IS STALE FOR THE CURRENT FLEET AND DISABLED IN THE UI !!
+# Every dict below predates the v5 + Qwen2-VL-7B deploy (2026-07-27):
+#   * VLM values are Qwen2-VL-2B v3's (0.05–0.25). The deployed 7B was gated
+#     entirely at t = 0.50; at 0.05 it flags almost everything.
+#   * ResNet-50 / ViT-B/16 values are June v2, applied to v5 weights, and the
+#     backbone checkpoints ship no thresholds to override them.
+#   * CLIP / DINOv2 v5 checkpoints DO carry their own thresholds and override
+#     these at load time (see each evaluator's `cal_thresholds` read).
+# Regenerate all five sets against the deployed fleet before re-enabling the
+# UI radio in app.py.
 
 THRESHOLD_MODES = ["balanced", "calibrated"]
 DEFAULT_THRESHOLD_MODE = "balanced"
