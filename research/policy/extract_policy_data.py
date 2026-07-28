@@ -43,6 +43,7 @@ HOME = Path.home()
 TRAJ = REPO_ROOT / "generated_training_data/trajectories.jsonl"
 CAL = DATA_ROOT / "experiments_out/fleet_calibration.json"
 OUT_DIR = DATA_ROOT / "experiments_out/policy_data"
+RESCORED = DATA_ROOT / "experiments_out/trajectory_scores.json"
 
 OPTS = ["too_thick", "broken_lines", "missing_parts", "missing_texture", "extra_parts"]
 EPS = 1e-6
@@ -52,6 +53,26 @@ def load_calibrators():
     cal = json.loads(CAL.read_text())
     print(f"calibrators for fleet: {cal.get('fleet', '?')}")
     return cal["calibrators"]
+
+
+def load_rescored():
+    """Per-image scores from the deployed fleet, if they have been produced.
+
+    Without this file the only scores available are the ones each fleet logged
+    at collection time, which span several fleet generations — so applying the
+    current fleet's calibrators to them mixes distributions and corrupts the
+    reward sign. research/experiments/rescore_trajectories.py produces the
+    single-fleet replacement; prefer it whenever present.
+    """
+    if not RESCORED.exists():
+        print("WARNING: no trajectory_scores.json — falling back to the scores "
+              "logged at collection time. Rewards will be FLEET-MIXED and the "
+              "`helped` counts are not trustworthy. Run "
+              "research/experiments/rescore_trajectories.sh first.")
+        return None
+    d = json.loads(RESCORED.read_text())
+    print(f"re-scored images from: {d.get('fleet', '?')}  ({d.get('n_images')} images)")
+    return d["scores"]
 
 
 def calibrate(p, c):
@@ -86,10 +107,20 @@ def norm_text(s, obj=""):
 
 def main():
     calibrators = load_calibrators()
+    rescored = load_rescored()
     trajs = [json.loads(l) for l in TRAJ.read_text().splitlines()]
+
+    def scores_of(step):
+        """Deployed-fleet scores for this step's image, else the logged ones."""
+        if rescored is not None:
+            img = step.get("tac_image", "")
+            if img in rescored:
+                return rescored[img]
+        return step.get("scores", {})
 
     bc, dpo = [], []
     n_steps = n_prefill = n_accept_logged = n_accept_norm = 0
+    n_rescored_hits = n_logged_fallback = 0
 
     for t in trajs:
         obj = (t.get("object") or "").strip()
@@ -103,10 +134,18 @@ def main():
                 continue
             n_steps += 1
 
-            raw_prev = defect_mass(prev.get("scores", {}))
-            raw_curr = defect_mass(curr.get("scores", {}))
-            cal_prev = defect_mass(prev.get("scores", {}), calibrators)
-            cal_curr = defect_mass(curr.get("scores", {}), calibrators)
+            s_prev, s_curr = scores_of(prev), scores_of(curr)
+            if rescored is not None:
+                for st in (prev, curr):
+                    if st.get("tac_image", "") in rescored:
+                        n_rescored_hits += 1
+                    else:
+                        n_logged_fallback += 1
+
+            raw_prev = defect_mass(s_prev)
+            raw_curr = defect_mass(s_curr)
+            cal_prev = defect_mass(s_prev, calibrators)
+            cal_curr = defect_mass(s_curr, calibrators)
             r_raw = round(raw_prev - raw_curr, 4) if None not in (raw_prev, raw_curr) else None
             r_cal = round(cal_prev - cal_curr, 4) if None not in (cal_prev, cal_curr) else None
 
@@ -116,7 +155,7 @@ def main():
                 "era": era,
                 "nat_image": curr.get("nat_image", ""),
                 "tac_image": prev.get("tac_image", ""),   # the image being edited
-                "scores_raw": prev.get("scores", {}),
+                "scores_raw": s_prev,
                 "target_option": curr.get("target_option", ""),
                 "history": list(history),
             }
@@ -158,6 +197,10 @@ def main():
         "accept_logged_flag": n_accept_logged,
         "accept_after_normalization": n_accept_norm,
         "effective_acceptance_rate": round(n_accept_norm / n_prefill, 3) if n_prefill else None,
+        "score_source": ("deployed-fleet re-score" if rescored is not None
+                         else "trajectory-logged (FLEET-MIXED — rewards unreliable)"),
+        "step_scores_from_rescore": n_rescored_hits,
+        "step_scores_from_log": n_logged_fallback,
     }
     (OUT_DIR / "stats.json").write_text(json.dumps(stats, indent=2))
     print(json.dumps(stats, indent=2))

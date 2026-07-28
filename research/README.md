@@ -64,8 +64,17 @@ Override either anchor per-job with `TACTILE_REPO` / `TACTILE_DATA_ROOT`.
 
 ## Known issues
 
-Verified defects in this tree are tracked in the audit punch-list in
-`project_notes/SESSION_NOTES_JULY24.md` (not published). The load-bearing
-ones: `extract_policy_data.py` applies current-fleet calibrators to raw
-scores logged by earlier fleets, and `rederive_fleet.py` derives ensemble
-weights as raw accuracy on a ~5%-positive set.
+Tracked in `project_notes/SESSION_NOTES_JULY27.md` (not published).
+
+**Fixed.** `extract_policy_data.py` used to apply current-fleet calibrators to
+raw scores logged by earlier fleets. It now prefers
+`experiments_out/trajectory_scores.json` (produced by
+`experiments/rescore_trajectories.py`, one deployed-fleet pass over every
+trajectory image) and warns loudly if that file is missing. `stats.json`
+records which source was used.
+
+**Open.** `rederive_fleet.py` derives ensemble weights as raw accuracy on a
+set that is ~21% positive — inflated by inferred positives, against ~5% on
+accepted finals. The resulting weights are decision-inert: over all 32 flag
+patterns the weighted vote equals a plain 3-of-5 majority. Redesigning that
+combiner is tracked as backlog item C2.

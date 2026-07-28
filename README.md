@@ -61,7 +61,7 @@ Each checkpoint folder under `models/` carries a `TRAINING_RECIPE.txt` stating e
 - **987 human-annotated pairs** across six object categories — every pair labeled by a human for all five defect dimensions. These form `splits_v2`: **966 train / 146 val / 153 test** pairs.
 - **154 GPT-generated pairs** collected through the pipeline itself, each with checkbox-verified final labels, contributing 894 option-rows to the training split (5,022 rows total).
 - **Inferred labels from edit actions**: when the user targets a defect with an edit, the pre-edit image is labeled positive for that defect — the action itself is the label.
-- **A frozen GPT-domain holdout** — every 5th collected pair, never trained on: **30 pairs / 150 flag decisions**. This is what measures whether the models are learning the generated-image domain rather than the original corpus.
+- **A frozen GPT-domain holdout** — **30 pairs / 150 flag decisions**, held out from every training split. Generated pairs *are* part of training (the 894 rows above); these 30 sessions are the ones deliberately withheld, so the holdout measures generalization to **unseen** generated pairs rather than transfer to an unseen domain.
 
 ---
 
@@ -85,7 +85,9 @@ On the original corpus the ensemble is the strongest judge — best macro F1 and
 
 ### GPT-domain holdout — 30 generated pairs, 150 decisions
 
-This is the domain the live app actually runs on: images produced by the pipeline itself, never trained on. **Only 8 of the 150 labels are positive**, so it is primarily a false-alarm test.
+This is the domain the live app actually runs on: images produced by the pipeline itself. Generated pairs **are** part of training — these 30 sessions are the ones withheld from it, disjoint from every training split by pair id, image path, session directory, and natural reference photo. So this measures generalization to unseen generated pairs, not transfer to an unseen domain, which makes the result below harder on the models rather than easier: they have seen this drawing style and still over-flag it.
+
+**Only 8 of the 150 labels are positive**, so it is primarily a false-alarm test.
 
 | Judge | Correct decisions | |
 |---|:---:|---|
