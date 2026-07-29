@@ -64,7 +64,7 @@ Override either anchor per-job with `TACTILE_REPO` / `TACTILE_DATA_ROOT`.
 
 ## Known issues
 
-Tracked in `project_notes/SESSION_NOTES_JULY27.md` (not published).
+Tracked in `project_notes/SESSION_NOTES_JULY29.md` (not published).
 
 **Fixed.** `extract_policy_data.py` used to apply current-fleet calibrators to
 raw scores logged by earlier fleets. It now prefers

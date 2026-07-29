@@ -14,7 +14,7 @@
 module load StdEnv/2023 python/3.11 scipy-stack
 source ~/vlm_finetune/venv/bin/activate
 
-# HuggingFace cache (Qwen2-VL-2B base model lives here)
+# HuggingFace cache (Qwen2-VL-7B base model lives here)
 export HF_HOME=$SCRATCH/hf_cache
 export TRANSFORMERS_CACHE=$SCRATCH/hf_cache
 export TORCH_HOME=$SCRATCH/torch_cache
