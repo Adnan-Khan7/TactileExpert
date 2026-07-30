@@ -40,8 +40,29 @@ from _paths import DATA_ROOT, REPO_ROOT  # noqa: E402
 import argparse
 import json
 import random
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
+
+import importlib.util
+
+
+def _load_edit_instructions() -> dict:
+    """Load EDIT_INSTRUCTIONS from evaluators/constants.py BY PATH.
+
+    A plain `from evaluators.constants import ...` executes evaluators/__init__.py,
+    which imports torch — and this builder is deliberately runnable on a login
+    node with bare python. Loading the module file directly keeps that property
+    while still treating constants.py as the single source of truth.
+    """
+    path = REPO_ROOT / "evaluators" / "constants.py"
+    spec = importlib.util.spec_from_file_location("_tactile_constants", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.EDIT_INSTRUCTIONS
+
+
+EDIT_INSTRUCTIONS = _load_edit_instructions()
 
 POLICY_DIR = DATA_ROOT / "experiments_out/policy_data"
 BC_FILE    = POLICY_DIR / "bc.jsonl"
@@ -121,6 +142,39 @@ def build_messages(rec: dict, answer: str | None) -> list:
     return msgs
 
 
+def _norm_instruction(text: str, obj: str = "") -> str:
+    """Normalise for template comparison, undoing the app's object substitution.
+
+    app.py prefills templates with "the object" replaced by the real object name
+    ("the giraffe"), so the stored instruction must be mapped back before it can
+    be matched against EDIT_INSTRUCTIONS.
+    """
+    s = text.strip()
+    if obj:
+        s = s.replace(f"the {obj}", "the object")
+    return re.sub(r"\s+", " ", s).lower().rstrip(".")
+
+
+_TEMPLATES = {_norm_instruction(v) for v in EDIT_INSTRUCTIONS.values()}
+
+
+def is_accepted_prefill(rec: dict) -> bool:
+    """True when the logged instruction IS a verbatim edit template.
+
+    These are steps where the annotator accepted the suggestion unchanged, so
+    the record carries no independent human signal — and, worse, the template is
+    exactly the text the DPO stage scores as `rejected`. Training BC on them
+    raises the likelihood of the language DPO must then suppress. Measured on
+    the first run: 13 of 115 SFT train records, averaging 239 chars against 114
+    for the rest, and the DPO margin started at -1.2287 as a result.
+
+    bc.jsonl carries no prefill field, so membership is decided by matching the
+    instruction against EDIT_INSTRUCTIONS rather than by re-reading trajectories.
+    """
+    return _norm_instruction(rec.get("instruction", ""),
+                             (rec.get("object") or "").strip()) in _TEMPLATES
+
+
 def assign_splits(traj_ids: list[str], seed: int,
                   ratios=(0.70, 0.15, 0.15)) -> dict[str, str]:
     """Deterministic trajectory-level split, shared by SFT and DPO.
@@ -164,6 +218,12 @@ def main():
                     help="Keep only SFT records with calibrated reward above this. "
                          "Omit to keep all (recommended: filtering is a "
                          "training-time choice, not a data-build one).")
+    ap.add_argument("--drop-accepted-prefill", action="store_true",
+                    help="Exclude SFT records whose instruction is a verbatim "
+                         "edit template (the annotator accepted the suggestion). "
+                         "These teach BC the language DPO scores as `rejected`. "
+                         "Affects SFT only — the DPO pairs are untouched, so a "
+                         "run with and without this flag is a controlled test.")
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args()
 
@@ -190,6 +250,9 @@ def main():
         bc_kept = [r for r in bc_kept
                    if r.get("reward_calibrated") is not None
                    and r["reward_calibrated"] > args.min_reward]
+    n_template = sum(1 for r in bc_kept if is_accepted_prefill(r))
+    if args.drop_accepted_prefill:
+        bc_kept = [r for r in bc_kept if not is_accepted_prefill(r)]
 
     # One assignment over the UNION, so a trajectory contributing to both
     # datasets lands in the same split in both.
@@ -231,6 +294,8 @@ def main():
         "seed": args.seed,
         "era_filter": args.era,
         "min_reward": args.min_reward,
+        "drop_accepted_prefill": args.drop_accepted_prefill,
+        "accepted_prefill_records_in_scope": n_template,
         "trajectories_total": len(all_trajs),
         "trajectories_per_split": dict(Counter(split_of.values())),
         "sft": {},

@@ -52,13 +52,29 @@ mkdir -p logs
 
 set -e
 
+# POLICY_TAG suffixes every output dir so a variant never overwrites the
+# baseline. POLICY_BUILD_ARGS is passed through to the dataset builder.
+#   Baseline: sbatch research/policy/train_policy.sh
+#   Variant : POLICY_TAG=_noprefill POLICY_BUILD_ARGS=--drop-accepted-prefill \
+#             sbatch research/policy/train_policy.sh
+TAG="${POLICY_TAG:-}"
+DATA_SUB="experiments_out/policy_data${TAG}"
+BC_OUT="output_policy_bc${TAG}"
+DPO_OUT="output_policy_dpo${TAG}"
+
+echo "tag='${TAG}'  build_args='${POLICY_BUILD_ARGS:-none}'  model=$MODEL"
+
 echo "=== 1/3  Building policy splits (trajectory-grouped, shared BC/DPO) ==="
-python "$REPO/research/policy/build_policy_dataset.py" --seed 42
+python "$REPO/research/policy/build_policy_dataset.py" \
+    --seed 42 \
+    --out-dir "$TACTILE_DATA_ROOT/$DATA_SUB" \
+    ${POLICY_BUILD_ARGS:-}
 
 echo "=== 2/3  Behavior cloning (model: $MODEL) ==="
 python "$REPO/research/policy/train_bc_policy.py" \
     --model-path "$MODEL" \
-    --out-dir output_policy_bc \
+    --sft-dir "$TACTILE_DATA_ROOT/$DATA_SUB/sft" \
+    --out-dir "$BC_OUT" \
     --epochs 8 \
     --patience 3 \
     --seed 42
@@ -66,8 +82,9 @@ python "$REPO/research/policy/train_bc_policy.py" \
 echo "=== 3/3  DPO from the BC checkpoint (all 57 pairs, no reward filter) ==="
 python "$REPO/research/policy/train_dpo_policy.py" \
     --model-path "$MODEL" \
-    --init-from output_policy_bc/best_checkpoint \
-    --out-dir output_policy_dpo \
+    --init-from "$BC_OUT/best_checkpoint" \
+    --pair-dir "$TACTILE_DATA_ROOT/$DATA_SUB/dpo_pairs" \
+    --out-dir "$DPO_OUT" \
     --epochs 4 \
     --patience 2 \
     --seed 42

@@ -137,15 +137,62 @@ prefill shown was the `broken_lines` template while the annotator was addressing
 `missing_texture`, because the card and the dropdown sort flagged options by
 different keys.
 
+## Controlled variant — job 18710250, `--drop-accepted-prefill` (2B, 10m10s)
+
+Tests finding 1 directly. The builder drops SFT records whose instruction is a
+verbatim template (13 of 115 train, 19 across all splits); **the DPO pairs and
+the trajectory split assignment are held identical**, so any change in the DPO
+numbers is attributable to the BC training data alone.
+
+```
+                              baseline        --drop-accepted-prefill
+SFT train records                 115                    102
+DPO pairs (unchanged)          44/8/5                 44/8/5
+
+DPO baseline mean_margin      −1.2287                +1.4983      <- sign flips
+DPO baseline loss              1.1754                 0.9344
+best val_loss             1.1207 (ep3)           0.8905 (ep4)
+val margin at best            −0.4044                +2.2720
+margin trajectory   −0.91 −0.67 −0.40 −0.58   +1.89 +2.16 +2.23 +2.27
+```
+
+**Conclusion: confirmed.** Training BC on accepted-prefill records is what drove
+the preference margin negative. Removed, the BC policy already prefers the human
+instruction over the template before DPO starts, and DPO builds on that instead
+of spending its budget reversing it. Every comparable DPO metric improves.
+
+**What this does NOT show.** `pref_accuracy` is 0.5 — 4 of 8 — in *both* runs and
+did not move despite the 2.7 margin swing. The mean margin is therefore being
+carried by magnitude on a few pairs, not by more pairs being ranked correctly.
+On 8 val pairs, mean margin is not a robust statistic. The defensible claim is
+about sign and direction under a controlled change; the claim that the variant
+policy ranks human instructions better pair-for-pair is NOT supported.
+
+**The test split inverts.** The variant scores *worse* on test (accuracy 0.8,
+margin 5.80) than the baseline (1.0, 12.81) — because the test split is 60%
+template-vs-template and so rewards exactly the template bias the variant
+removes. This is independent confirmation that the test numbers measure the
+wrong thing. Cite neither.
+
+BC losses are **not** comparable across the two runs: dropping records shrinks
+the BC val and test sets too (17→15, 25→21), so 2.6235 vs 2.6929 is a different
+denominator, not a regression.
+
+Both DPO runs hit their 4-epoch cap (the variant was still improving at epoch 4),
+as did both BC runs at 8. Nothing here was selected by early stopping.
+
 ## Open, not decided
 
-- **Whether to exclude accepted-prefill records from BC.** Finding 1 above: 13
-  SFT records teach the template language DPO then has to reverse. Dropping them
-  costs ~11% of a thin set but stops the two objectives working against each
-  other. Worth running as a variant before changing the default.
-- **BC ran to its epoch cap**, so `--epochs 8` truncated it rather than patience
-  selecting a minimum (best epoch was 8 of 8, though the last gains were 0.012
-  and 0.003). `--epochs 12` would settle whether 8 is the floor.
+- **Whether `--drop-accepted-prefill` becomes the default.** The variant above
+  settles the mechanism but not the policy question: dropping the records costs
+  11% of a thin SFT set to remove a bias whose measured effect is on an 8-pair
+  val margin. My read is that it should be the default — the two objectives
+  demonstrably fight otherwise — but it is a judgement call, and the supporting
+  statistic is weak. Re-decide once collection resumes and the sets are larger.
+- **Every run hit its epoch cap** — BC at 8, DPO at 4, in both configurations,
+  and the variant's DPO was still improving at epoch 4. Nothing was selected by
+  early stopping, so none of these is a converged number. `--epochs 12 / 8`
+  would settle it, at roughly 15 GPU-minutes.
 - Whether to condition on `era`, or drop the 55 pre-ensemble records.
 - Whether the reward belongs in the SFT objective at all (currently it is
   metadata only; `--min-reward` on the builder would filter instead).
