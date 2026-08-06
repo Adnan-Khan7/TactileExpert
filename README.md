@@ -184,10 +184,6 @@ VLM 743/915  vs  Ensemble 729/915    net -14   p=0.2819   not significant
 So combining five judges buys nothing over the single best one in decisions
 actually made, and costs significantly on `broken_lines`.
 
-And the weights are decorative regardless: across all 32 possible vote patterns
-the weighted vote is **identical to an unweighted 3-of-5 majority**, under both
-accuracy- and AUC-derived weights. No value in the fitted range can move a flag.
-
 ### Negative results worth recording
 
 - **Input resolution is not the bottleneck.** Quadrupling the VLM's pixel
@@ -435,8 +431,7 @@ criteria — plus every intermediate iteration.
 **Measurement resolution, mainly.** The binding constraint on almost every
 question in this repository is that test has 183 pairs and only 26 `too_thick`
 positives. Nothing detects an effect below ~0.10 on the thin classes. Roughly
-four times the positives would halve that bar. That is the difference between
-"we could not measure it" and an answer.
+four times the positives would halve that bar.
 
 **A defensible ceiling.** Double-annotating a subset with a deliberate gap gives
 per-option human agreement. That number reframes every model result and does not
@@ -503,10 +498,6 @@ for `too_thick` despite an AUC of 0.75 there.
   positive). What it does mean is that the corpus balance shifts as generated
   sessions accumulate — so record the mix, and re-check the balance table when it
   moves materially.
-- **In-flow labels are noisier than reviewed ones.** The label-noise finding came
-  from labels collected during editing. New sessions inherit that. Budget a
-  verification pass for anything destined for an evaluation split, or treat
-  fresh sessions as training data only.
 - **Inferred positives are action labels, not diagnoses.** A pre-edit image
   marked `too_thick` records what the expert chose to fix, not the only thing
   wrong with it. 37.5% of them were corrected on review.
@@ -582,23 +573,6 @@ Shuffling can leave one side with 41% `missing_parts` positives and the other
 with 31%; bucketing forces them to match. It also preserves *co-occurrence*,
 because a signature is a joint pattern rather than five separate marginals.
 
-### "Not pixel-registered"
-
-Overlay the photograph and the tactile rendering and nothing lines up. The
-tactile version is drawn afresh, not traced over the photo — different size,
-framing and shape. 278 of 300 sampled pairs do not even share an aspect ratio
-(one is 872×841 beside 176×287). Only the *content* corresponds, never the
-coordinates — which is why "crop the same region from both" is not a meaningful
-operation here.
-
-### "The weights are decorative"
-
-The ensemble flags when the weighted vote passes half. Five judges voting yes/no
-gives 2⁵ = 32 possible patterns; all 32 were enumerated. The two largest weights
-together never reach half the total, so two votes can never flag; the three
-smallest always exceed it, so three votes always flag. Nothing in between exists.
-Replacing every weight with 1.0 would produce identical behaviour.
-
 ### GroupKFold
 
 155 edit steps came from only 82 sessions, because one session yields several
@@ -606,11 +580,6 @@ steps as the same image is edited repeatedly. A random split would put step 1 in
 training and step 2 in testing — nearly the same image — and the model would
 score well by recognising it rather than generalising. GroupKFold keeps every
 step of a session on the same side of the split.
-
-### φ
-
-Pronounced "phi" (rhymes with *fly*). Here it names a function: φ(q) is the mean
-defect probability across the judges for image q.
 
 ---
 
