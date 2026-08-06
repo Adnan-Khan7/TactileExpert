@@ -25,6 +25,7 @@ import io
 import json
 import tempfile
 from datetime import datetime
+import os
 from pathlib import Path
 
 import gradio as gr
@@ -42,7 +43,11 @@ from generation.gpt_generator import (
 )
 
 HERE      = Path(__file__).resolve().parent
-TRAIN_DIR = HERE / "generated_training_data"
+# Collection root. Defaults to a FRESH directory so new sessions cannot mix with
+# the frozen v1 corpus in generated_training_data/, which the splits and
+# trajectories.jsonl still reference. Override with TACTILE_COLLECT_DIR.
+TRAIN_DIR = Path(os.environ.get("TACTILE_COLLECT_DIR",
+                                HERE / "generated_training_data_v2"))
 TRAJ_FILE = TRAIN_DIR / "trajectories.jsonl"
 
 AVAILABLE_MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16", "DINOv2 Probe",
@@ -164,7 +169,7 @@ def _eval_table(model_results: dict, mode: str) -> str:
     # Column headers
     col_w = f"{int(56 / total)}%"
     head_row = (
-        f"<tr style='background:#f0f0f0'>"
+        f"<tr style='background:#f0f0f0;color:#222'>"
         f"<th style='text-align:left;padding:5px 8px;width:28%;font-size:12px'>Option</th>"
         + "".join(
             "<th style='text-align:center;padding:5px;width:{};font-size:12px;"
@@ -257,8 +262,8 @@ def _ensemble_card(mr: dict, mode: str, obj: str = "") -> str:
                 inst = inst.replace("the object", f"the {obj}")
             items.append(
                 f"<div style='margin:7px 0;padding:8px 10px;background:#fdf6f6;"
-                f"border-left:3px solid #e74c3c;border-radius:4px'>"
-                f"<span style='font-weight:700;font-size:13px'>{i+1}. {OPTION_DISPLAY[o]}</span>"
+                f"border-left:3px solid #e74c3c;border-radius:4px;color:#222'>"
+                f"<span style='font-weight:700;font-size:13px;color:#222'>{i+1}. {OPTION_DISPLAY[o]}</span>"
                 f"<span style='font-size:11px;color:#888'> &nbsp;{d['n_agree']}/{d['n_models']} models agree · "
                 f"vote {d['vote_share']:.0%} · mean p {d['prob_yes']:.2f}</span><br>"
                 f"<span style='font-size:12px;color:#444'>{inst}</span>"
@@ -269,7 +274,7 @@ def _ensemble_card(mr: dict, mode: str, obj: str = "") -> str:
     clean_line = (f"<div style='font-size:11px;color:#27ae60;margin-top:6px'>"
                   f"Clear: {', '.join(clean)}</div>" if clean else "")
     return (f"<div style='font-family:sans-serif;border:1px solid #f1c40f;border-radius:8px;"
-            f"padding:12px 14px;background:#fffdf5'>"
+            f"padding:12px 14px;background:#fffdf5;color:#222'>"
             f"<div style='font-size:11px;color:#b7950b;font-weight:700;margin-bottom:4px'>"
             f"ENSEMBLE (WEIGHTED) · {mode} thresholds</div>"
             f"{verdict}{body}{clean_line}</div>")
@@ -337,7 +342,7 @@ def _edit_log_html(history: list[dict]) -> str:
     ctx_html = ""
     if context:
         ctx_html = (
-            f"<div style='margin-top:8px;padding:6px 8px;background:#fff3cd;"
+            f"<div style='margin-top:8px;padding:6px 8px;background:#fff3cd;color:#555;"
             f"border-radius:4px;font-size:11px;color:#555'>"
             f"<b>Context sent to next API call:</b><br>"
             f"<span style='color:#333'>{context[:300]}{'…' if len(context)>300 else ''}</span>"
@@ -364,7 +369,7 @@ def _build_context(history: list[dict]) -> str:
 def _all_clear_html() -> str:
     return (
         "<div style='padding:12px 16px;background:#f0fff4;border:2px solid #27ae60;"
-        "border-radius:8px;font-family:sans-serif'>"
+        "border-radius:8px;font-family:sans-serif;color:#222'>"
         "<div style='font-size:15px;font-weight:700;color:#27ae60'>✓ All selected models see no defects</div>"
         "<div style='margin-top:6px;font-size:13px;color:#333'>"
         "You can continue iterating if you see a remaining issue, or save this "
@@ -728,110 +733,85 @@ def main():
             mode_lbl, selected_models, trusted_model, combine_all)
         return last["pil"], tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
-    def on_save_to_train(label_selections: list, synthetic: bool,
-                         mode_lbl: str, selected_models: list):
-        if not _state:
-            return "⚠ Nothing to save yet."
-        last = _state[-1]
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pair_dir = TRAIN_DIR / f"pair_{ts}"
-        pair_dir.mkdir(parents=True, exist_ok=True)
+    # One save action, one artifact per iteration. The session directory is
+    # assigned on first save and reused, so every iteration of a session lands
+    # together without a separate "finish the session" step.
+    _session = {"dir": None}
 
-        # ── Save final natural + tactile images ───────────────────────────────
-        nat_out = pair_dir / "natural.jpg"
-        tac_out = pair_dir / "tactile.jpg"
-        last["nat_pil"].save(nat_out, format="JPEG", quality=95)
-        last["pil"].save(tac_out,    format="JPEG", quality=95)
+    def _upsert(path: Path, row: dict, key: str = "pair_id") -> int:
+        """Write row, replacing any existing row with the same key.
+
+        Re-saving an iteration must CORRECT its label, not append a second
+        contradictory one.
+        """
+        rows = []
+        if path.exists():
+            rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        rows = [r for r in rows if r.get(key) != row.get(key)]
+        rows.append(row)
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return len(rows)
+
+    def on_step_save(step_selections: list, synthetic: bool,
+                     mode_lbl: str, selected_models: list, obj: str):
+        """Save the CURRENT iteration with its five labels. Self-contained.
+
+        Every iteration is a legitimate training pair — the photograph plus one
+        tactile rendering, fully labelled. Previously only the final image got a
+        complete label while intermediates carried a single inferred positive
+        (the defect the annotator targeted), which is an ACTION label rather than
+        a diagnosis; 37.5% were corrected on review. Saving per iteration removes
+        that ambiguity, and drops the old duplicate `tactile.jpg` that was a
+        byte-identical copy of the last `tactile_iter*.jpg` carrying its own
+        separate label row.
+        """
+        if not _state:
+            return "<b style='color:#b00'>Nothing to save — generate or upload first.</b>"
+        it  = _state[-1]
+        idx = len(_state) - 1
+
+        if _session["dir"] is None:
+            _session["dir"] = TRAIN_DIR / f"pair_{datetime.now():%Y%m%d_%H%M%S}"
+        pdir = _session["dir"]
+        pdir.mkdir(parents=True, exist_ok=True)
+
+        nat_out = pdir / "natural.jpg"
+        if not nat_out.exists():
+            nat_src = next((x["nat_pil"] for x in _state if x.get("nat_pil")), None)
+            if nat_src is None:
+                return "<b style='color:#b00'>No natural reference in this session.</b>"
+            nat_src.save(nat_out, format="JPEG", quality=95)
+        tac_out = pdir / f"tactile_iter{idx}.jpg"
+        it["pil"].save(tac_out, format="JPEG", quality=95)
 
         nat_rel = str(nat_out.relative_to(TRAIN_DIR))
         tac_rel = str(tac_out.relative_to(TRAIN_DIR))
+        labels  = {o: int(o in step_selections) for o in ALL_OPTIONS}
+        row = {"pair_id": f"{nat_rel}::{tac_rel}",
+               "natural_image": nat_rel, "tactile_image": tac_rel,
+               "object": obj or "", "source": "gpt-image-1",
+               "iteration": it.get("label", f"iter {idx}"),
+               "saved_at": datetime.now().isoformat(timespec="seconds"),
+               "synthetic_corruption": bool(synthetic), **labels}
+        n = _upsert(TRAIN_DIR / "annotations.jsonl", row)
 
-        # ── Annotation record (existing format — splits_v2 compatible) ────────
-        record = {
-            "pair_id":       f"{nat_rel}::{tac_rel}",
-            "natural_image": nat_rel,
-            "tactile_image": tac_rel,
-            "object":        last.get("object", ""),
-            "source":        "gpt-image-1",
-            "iteration":     last["label"],
-            "saved_at":      datetime.now().isoformat(timespec="seconds"),
-            # Provenance for the controlled-corruption protocol: this pair's
-            # defects were INTRODUCED on purpose to enrich a starved class, not
-            # observed. Written at collection time because retrofitting it later
-            # is not possible — nothing else in the record distinguishes a
-            # deliberate corruption from a naturally occurring defect.
-            # MUST be honoured at merge: synthetic pairs go to train/val ONLY,
-            # never the holdout, or the holdout stops measuring natural defects.
-            "synthetic_corruption": bool(synthetic),
-        }
-        for opt in ALL_OPTIONS:
-            record[opt] = 1 if opt in label_selections else 0
+        sess = {"session_id": pdir.name, "object": row["object"],
+                "updated_at": row["saved_at"],
+                "synthetic_corruption": bool(synthetic),
+                "iterations": [{"index": i, "label": x.get("label", ""),
+                                "instruction": x.get("instruction", ""),
+                                "scores": _iter_scores(x, selected_models)}
+                               for i, x in enumerate(_state)]}
+        _upsert(TRAIN_DIR / "sessions.jsonl", sess, key="session_id")
 
-        ann_file = TRAIN_DIR / "annotations.jsonl"
-        with open(ann_file, "a") as f:
-            f.write(json.dumps(record) + "\n")
-
-        # ── Trajectory record ─────────────────────────────────────────────────
-        # Save each iteration's tactile image and build (state, action, reward) steps.
-        steps = []
-        prev_mean = None
-        for i, it in enumerate(_state):
-            tac_iter_out = pair_dir / f"tactile_iter{i}.jpg"
-            it["pil"].save(tac_iter_out, format="JPEG", quality=95)
-
-            scores   = _iter_scores(it, selected_models)
-            mean_prob = _mean_defect_prob(scores)
-            # Reward = reduction in mean defect probability vs previous step.
-            # Positive = this edit helped. Negative = things got worse.
-            reward = round(prev_mean - mean_prob, 4) if prev_mean is not None else None
-
-            prefill = it.get("prefill_instruction", "")
-            steps.append({
-                "iter_label":       it["label"],
-                "instruction":      it.get("instruction", ""),
-                "target_option":    it.get("target_option", ""),
-                "prefill_instruction": prefill,
-                "prefill_trusted":  it.get("prefill_trusted", ""),
-                "accepted_prefill": bool(prefill) and
-                                    it.get("instruction", "").strip() == prefill.strip(),
-                "nat_image":        nat_rel,
-                "tac_image":        str(tac_iter_out.relative_to(TRAIN_DIR)),
-                "scores":           scores,
-                "mean_defect_prob": mean_prob,
-                "reward":           reward,
-            })
-            prev_mean = mean_prob
-
-        # Evaluator flags per model at the final iteration (balanced t=0.50),
-        # including the weighted Ensemble when selected. Stored separately from
-        # human_labels so disagreements are visible.
-        evaluator_flags = {}
-        for model, res in _get_results(last, "balanced", selected_models).items():
-            evaluator_flags[model] = {
-                opt: int(res["options"][opt]["flagged"])
-                for opt in ALL_OPTIONS if opt in res["options"]
-            }
-
-        human_labels = {opt: (1 if opt in label_selections else 0) for opt in ALL_OPTIONS}
-
-        traj = {
-            "trajectory_id":   f"traj_{ts}",
-            "object":          last.get("object", ""),
-            "n_iters":         len(_state),
-            "saved_at":        datetime.now().isoformat(timespec="seconds"),
-            "source":          "gpt-image-1",
-            "steps":           steps,
-            "evaluator_flags": evaluator_flags,
-            "human_labels":    human_labels,
-            # Mirrored from the annotation record — trajectory consumers
-            # (extract_policy_data.py) must be able to exclude deliberate
-            # corruptions without joining back to annotations.jsonl.
-            "synthetic_corruption": bool(synthetic),
-        }
-        with open(TRAJ_FILE, "a") as f:
-            f.write(json.dumps(traj) + "\n")
-
-        return f"✅ Saved to generated_training_data/pair_{ts}/"
+        n_pos = sum(labels.values())
+        return (f"<b style='color:#0a0'>Saved</b> "
+                f"<code>{pdir.name}/{tac_out.name}</code> — {n_pos} of "
+                f"{len(ALL_OPTIONS)} marked present"
+                f"{' · synthetic' if synthetic else ''}.<br>"
+                f"<span style='color:#555'>{n} labelled pair(s) in "
+                f"annotations.jsonl. Re-saving this iteration overwrites its "
+                f"row rather than adding a second.</span>")
 
     def on_export_session():
         if not _state:
@@ -997,8 +977,9 @@ def main():
                     choices=[DEFAULT_MODE_LBL],
                     value=DEFAULT_MODE_LBL,
                     label="Decision thresholds",
-                    info="Calibrated mode is disabled — its thresholds predate "
-                         "the v5 + Qwen2-VL-7B fleet and would mis-flag.",
+                    info="Calibrated uses per-option thresholds refitted on the "
+                         "val split for THIS fleet. Balanced uses a flat 0.50, "
+                         "which under-flags the VLM on the rarer defects.",
                 )
 
                 gr.Markdown("### Evaluation — all models")
@@ -1035,37 +1016,36 @@ def main():
                         )
                         edit_log_html = gr.HTML(_edit_log_html([]))
 
-                    with gr.Tab("Save to Training"):
+                    with gr.Tab("Label & Save"):
                         gr.Markdown(
-                            "Approve the current iteration and save it as a "
-                            "training pair. Adjust the defect labels as needed — "
-                            "they are pre-filled from the evaluation. "
-                            "Saved to `generated_training_data/annotations.jsonl`."
+                            "Label the iteration currently shown and save it. "
+                            "**One click — this is the only save action.**\n\n"
+                            "Every iteration is a training pair in its own right: "
+                            "the photograph plus that tactile rendering, with all "
+                            "five options labelled. Save as many iterations of a "
+                            "session as are worth keeping; they share one folder.\n\n"
+                            "Re-saving an iteration **overwrites** its row rather "
+                            "than adding a second, so correcting a label is safe."
                         )
-                        save_labels = gr.CheckboxGroup(
+                        step_labels = gr.CheckboxGroup(
                             choices=[(OPTION_DISPLAY[o], o) for o in ALL_OPTIONS],
                             value=[],
-                            label="Defects present (uncheck = this pair is clean for this option)",
+                            label="Defects present in THIS iteration "
+                                  "(unchecked = confirmed absent)",
                         )
                         synth_cb = gr.Checkbox(
                             label="Deliberate corruption (synthetic positive)",
                             value=False,
-                            info="Tick ONLY when you prompted the generator to "
-                                 "introduce a defect on purpose. Recorded as "
-                                 "synthetic_corruption so these pairs can be kept "
-                                 "out of the holdout at merge.",
+                            info="Tick only when you prompted the generator to "
+                                 "introduce a defect on purpose. Recorded so these "
+                                 "pairs can be held out of evaluation splits.",
                         )
-                        gr.Markdown(
-                            "<small><b>When collecting synthetic positives:</b> the "
-                            "instruction is <i>not</i> the label. gpt-image-1 is not "
-                            "surgical — it will change things you did not ask about. "
-                            "Verify <b>all five</b> checkboxes against what you "
-                            "actually see, or you inject false negatives on the four "
-                            "you did not look at. One save per session, then "
-                            "<b>Reset</b>.</small>"
-                        )
-                        save_btn  = gr.Button("Save to training data", variant="primary")
-                        save_status = gr.Markdown()
+                        with gr.Row():
+                            step_prefill_btn = gr.Button(
+                                "Pre-fill from evaluators", size="sm")
+                            step_save_btn = gr.Button(
+                                "Save this iteration", variant="primary", size="sm")
+                        step_label_status = gr.HTML("")
 
         # ── Wiring ──────────────────────────────────────────────────────────────
 
@@ -1177,7 +1157,7 @@ def main():
             outputs=export_file,
         )
 
-        def _prefill_save_labels(mode_lbl, selected_models):
+        def _prefill_step_labels(mode_lbl, selected_models):
             if not _state:
                 return gr.update(value=[])
             it    = _state[-1]
@@ -1189,24 +1169,38 @@ def main():
             )
             return gr.update(value=flagged)
 
-        save_btn.click(
-            fn=on_save_to_train,
-            inputs=[save_labels, synth_cb, mode_radio, model_select],
-            outputs=save_status,
+        step_prefill_btn.click(
+            fn=_prefill_step_labels,
+            inputs=[mode_radio, model_select],
+            outputs=step_labels,
+        )
+        step_save_btn.click(
+            fn=on_step_save,
+            inputs=[step_labels, synth_cb, mode_radio, model_select, object_desc],
+            outputs=step_label_status,
         )
 
-        # Prefill save labels whenever eval runs.
+        # Toggling a judge re-scores the CURRENT image with the new selection and
+        # re-renders, so check/uncheck takes effect immediately rather than
+        # waiting for the next explicit evaluation.
+        _toggle_evt = model_select.change(
+            fn=on_reeval,
+            inputs=[mode_radio, model_select, trusted_radio, combine_cb],
+            outputs=_gen_outputs,
+        )
+
+        # Prefill the label checkboxes whenever eval runs.
         # MUST be .then() off each handler's event, never a second .click() on
         # the same button: separate listeners on one trigger run as independent
         # events, so this (instant) one finished before the generate/edit call
         # (~30 s) had appended the new iteration — prefilling the defect
         # checkboxes from the PREVIOUS iteration, which then get written to
         # annotations.jsonl as human_labels if the user doesn't catch it.
-        for _evt in (_gen_evt, _eval_evt, _edit_evt, _reeval_evt):
+        for _evt in (_gen_evt, _eval_evt, _edit_evt, _reeval_evt, _toggle_evt):
             _evt.then(
-                fn=_prefill_save_labels,
+                fn=_prefill_step_labels,
                 inputs=[mode_radio, model_select],
-                outputs=save_labels,
+                outputs=step_labels,
             )
 
     demo.queue()

@@ -40,8 +40,10 @@ output/
 # Local project planning notes (not for public repo)
 project_notes/
 
-# Generated training pairs (local data — images + annotations)
-generated_training_data/
+# Generated training pairs (local data — images + annotations).
+# Globbed so later collection generations (_v2, _v3 …) are covered too —
+# an exact directory name silently let generated_training_data_v2/ through.
+generated_training_data*/
 
 # The research workspace itself is NEVER part of this repo. research/ holds
 # only scripts; the corpus, splits, checkpoints and experiment outputs live at

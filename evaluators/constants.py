@@ -128,14 +128,14 @@ SYSTEM_PROMPT = (
 # UI radio in app.py.
 
 THRESHOLD_MODES = ["balanced", "calibrated"]
-DEFAULT_THRESHOLD_MODE = "balanced"
+DEFAULT_THRESHOLD_MODE = "calibrated"
 
 BALANCED_THRESHOLDS = {opt: 0.50 for opt in ALL_OPTIONS}
 
 # Val-calibrated thresholds — CLIP Probe v3 (trajectory-collection GPT data)
 CLIP_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.45,
-    "broken_lines":    0.45,
+    "too_thick":       0.70,
+    "broken_lines":    0.60,
     "missing_parts":   0.50,
     "missing_texture": 0.50,
     "extra_parts":     0.50,
@@ -145,37 +145,37 @@ CLIP_THRESHOLDS_CALIBRATED = {
 # broken_lines question, epoch 4)
 VLM_THRESHOLDS_CALIBRATED = {
     "too_thick":       0.05,
-    "broken_lines":    0.25,
-    "missing_parts":   0.15,
+    "broken_lines":    0.10,
+    "missing_parts":   0.40,
     "missing_texture": 0.05,
-    "extra_parts":     0.15,
+    "extra_parts":     0.05,
 }
 
 # Val-calibrated thresholds — ResNet-50 v2 (retrained June 2026)
 RESNET_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.20,
-    "broken_lines":    0.15,
-    "missing_parts":   0.35,
-    "missing_texture": 0.30,
-    "extra_parts":     0.45,
+    "too_thick":       0.30,
+    "broken_lines":    0.45,
+    "missing_parts":   0.40,
+    "missing_texture": 0.50,
+    "extra_parts":     0.05,
 }
 
 # Val-calibrated thresholds — ViT-B/16 v2 (retrained June 2026)
 VIT_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.05,
-    "broken_lines":    0.10,
-    "missing_parts":   0.40,
+    "too_thick":       0.50,
+    "broken_lines":    0.20,
+    "missing_parts":   0.05,
     "missing_texture": 0.10,
-    "extra_parts":     0.85,
+    "extra_parts":     0.80,
 }
 
 # Val-calibrated thresholds — DINOv2 ViT-L/14 probe v3 (trajectory-collection GPT data)
 DINO_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.75,
-    "broken_lines":    0.50,
-    "missing_parts":   0.50,
-    "missing_texture": 0.40,
-    "extra_parts":     0.50,
+    "too_thick":       0.50,
+    "broken_lines":    0.60,
+    "missing_parts":   0.40,
+    "missing_texture": 0.85,
+    "extra_parts":     0.40,
 }
 
 # Backward-compatible aliases

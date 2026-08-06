@@ -124,23 +124,43 @@ clear it at all**. Unifying the corpora is what made the question answerable.
 
 ### But almost all of the win is one option
 
-Per option, against always-clean:
+Per option, against always-clean, on the final fleet:
 
-- `missing_texture` — every judge wins decisively (+100 to +128 decisions)
-- `missing_parts` — only the VLM wins significantly (+21, p=0.013)
-- `too_thick`, `broken_lines` — **every vision judge is significantly *worse*
-  than answering "clean"**
-- `extra_parts` — nobody is significantly better
+| judge | overall | significant wins | significant **losses** |
+|---|---|---|---|
+| VLM Fine-tuned | +145, p<0.0001 | `missing_texture` +122, `missing_parts` +23 | none |
+| ResNet-50 | +87, p<0.0001 | `missing_texture` +112 | `broken_lines` −18 |
+| CLIP Probe | +82, p=0.0001 | `missing_texture` +116, `missing_parts` +18 | `broken_lines` −33 |
+| DINOv2 Probe | +49, p=0.0231 | `missing_texture` +109 | `too_thick` −18, `broken_lines` −39 |
+| ViT-B/16 | +34, p=0.0971 **n.s.** | `missing_texture` +90 | `too_thick` −16, `broken_lines` −33, `extra_parts` −19 |
 
-The honest summary: **the fleet reliably detects one defect out of five.**
+Every judge's win is carried by `missing_texture`. Strip that one option out and
+four of five are net *negative*. Three of five are **significantly worse than
+answering "clean"** on `broken_lines`.
 
-### The ensemble does not earn its place
+The honest summary: **the fleet reliably detects one defect out of five, and the
+VLM is the only member that never loses to a constant on any option.**
 
-The weighted ensemble is **significantly worse than its own best member**
-(−47 decisions, p=0.0004). And the weights are decorative: across all 32
-possible vote patterns, the weighted vote is **identical to an unweighted
-3-of-5 majority**, under both accuracy- and AUC-derived weights. Majority
-voting lets four weaker judges outvote the one strong one.
+### The ensemble is not clearly worth its complexity
+
+The five-judge ensemble has the best **macro** figures in the fleet — F1 0.621
+against CLIP's 0.578, AUC 0.797 against the VLM's 0.786. But macro F1 rewards
+flagging more: a 3-of-5 majority catches extra positives and improves recall
+faster than it loses precision.
+
+On the decisions themselves it does **not** beat its best member:
+
+```
+VLM 743/915  vs  Ensemble 729/915    net -14   p=0.2819   not significant
+  broken_lines                       net -19   p=0.0094   SIGNIFICANT (worse)
+```
+
+So combining five judges buys nothing over the single best one in decisions
+actually made, and costs significantly on `broken_lines`.
+
+And the weights are decorative regardless: across all 32 possible vote patterns
+the weighted vote is **identical to an unweighted 3-of-5 majority**, under both
+accuracy- and AUC-derived weights. No value in the fitted range can move a flag.
 
 ### Negative results worth recording
 
@@ -167,6 +187,13 @@ quoted against it.
 An earlier design proposed learning an **agent** that watches the editing loop
 and decides what to fix next. This section records why that was abandoned, and
 on what evidence, so the decision is auditable rather than a change of subject.
+
+**The four failures in one line each:**
+
+1. **No signal to act on** — the judges' scores don't predict which defect a human chooses to fix (0.42 vs 0.406 for guessing).
+2. **The reward only sees one defect** — it averages five judges that reliably detect one thing, so an agent would just chase texture.
+3. **There's no real decision to learn** — the instruction text follows automatically from the defect picked, so "learning" it is memorising five fixed strings.
+4. **Not enough data** — 155 edit steps from 82 sessions.
 
 ### What the proposal was, in plain terms
 
@@ -221,11 +248,6 @@ against always-clean on the verified test set, the fleet detects
 **significantly worse than answering "clean"** on `too_thick` and
 `broken_lines`. So `φ` is close to a `missing_texture` detector with noise
 attached, and an agent maximising it would learn to chase texture.
-
-The reward is also only meaningful if the probabilities are **calibrated** —
-a score of 0.30 should mean a 30% chance the defect is present. The fleet was
-trained with asymmetric and BCE losses and never calibrated, and the calibration
-constants that did exist were fitted against a superseded fleet.
 
 ### Failure 3 — the action space collapses
 
@@ -299,14 +321,15 @@ modelling door is closed and the remaining explanation is label noise.
 
 The current claim — an automatic evaluator fleet — is broader than the evidence.
 The defensible claim is **pre-screening for one high-prevalence defect**.
-`missing_texture` is 74% positive in library material, and the VLM reaches
-library-only AUC **0.941** on it, without the source-shortcut inflation that
-affects the vision judges. Catching the most common defect reliably is real
-workflow value for a transcriber, and it is a claim that survives scrutiny.
+`missing_texture` is the most common defect in the corpus — 135 of 183 test
+pairs — and the VLM reaches **AUC 0.952** on it. Catching the most common defect
+that reliably is real workflow value for a transcriber, and it is a claim that
+survives scrutiny.
 
 The five-judge ensemble should be dropped from that story: it is arithmetically
-a 3-of-5 majority vote, and it performs significantly *worse* than its own best
-member.
+a 3-of-5 majority vote, and on decisions actually made it does not beat its best
+single member (net −14, p=0.28) while costing significantly on `broken_lines`.
+One judge with a stated scope is a cleaner claim than five with none.
 
 ---
 
@@ -323,12 +346,9 @@ trustworthy."* Two halves, and they are in different shape:
 - *"measurably improves with use"* — this is the policy-learning claim, and the
   evidence above says it does not hold in that form.
 - *"experts find it usable and trustworthy"* — untouched, and still legitimately
-  future work behind the CUREB timeline.
-
-The phrase appears in three places in Chapter 1 (thesis statement, RQ4,
-contribution 4) and nowhere in Chapters 2–4. So the exposure is small and
-localised, but it is worth resolving deliberately rather than discovering it
-during a defence.
+  future work: a sample of system outputs is sent to tactile experts, who rate
+  them. No recruitment or live study is required, so it is a light protocol
+  rather than a long-lead one.
 
 ### A framing the evidence can carry
 
@@ -349,7 +369,7 @@ also the safer thing to put in front of a committee: a proposal that promises to
 | What is automatable | per-option, against always-clean, paired significance | **done** |
 | What bounds the rest | label stability; noise rank inversely predicts performance rank | measured, needs the ceiling study |
 | What was ruled out | resolution, capacity, ensembling, RL prerequisites | **done** |
-| Expert validation | transcriber study | future work, CUREB-gated |
+| Expert validation | tactile experts rate sampled outputs | future work |
 
 Four of five rest on results already in hand. The gap is the ceiling
 measurement, which is annotation work rather than compute.
@@ -365,7 +385,6 @@ introducing the negative result cold.
 
 ### Open questions for discussion
 
-- Reword RQ4 now, or write Chapter 5 and reconcile afterwards?
 - Is a measured ceiling on human agreement an acceptable *primary* contribution,
   or does the chapter need a positive modelling result alongside it?
 - Does the retired RL framework belong in Chapter 5 as a pre-registered negative,
@@ -407,6 +426,27 @@ learns from it.
 **What it does not buy:** trajectories for policy learning. That direction is
 closed on grounds that more of the same data does not reopen.
 
+### Collecting new sessions
+
+New collection writes to **`generated_training_data_v2/`**, kept separate from
+the frozen v1 corpus in `generated_training_data/`. The v1 splits and
+`trajectories.jsonl` still reference the old paths, so the old directory is left
+untouched rather than moved — isolating the new data achieves the same
+separation with none of the breakage. Override with `TACTILE_COLLECT_DIR`.
+
+**Every iteration can now carry a full five-option label.** Previously only the
+final pair of a session was completely labelled; intermediate images carried a
+single inferred positive — the defect the annotator chose to target. That is an
+*action* label, not a diagnosis, and 37.5% of them were corrected on review. The
+"Label This Iteration" tab records all five options for the image currently
+shown, pre-filled from the evaluators and correctable, at any point in the edit
+loop. It is optional; skipping it leaves behaviour unchanged.
+
+The threshold mode now defaults to **calibrated**, using per-option thresholds
+refitted on the val split for the current fleet. The flat 0.50 of balanced mode
+badly under-flags the VLM on the rarer defects — it fires on 3 of 183 test pairs
+for `too_thick` despite an AUC of 0.75 there.
+
 ### Things to watch
 
 - **Class balance beats volume.** Sessions sample the natural defect
@@ -415,8 +455,12 @@ closed on grounds that more of the same data does not reopen.
   collecting generally.
 - **Source drift.** Library and generated material have very different base
   rates — `missing_texture` is 88% positive in library pairs and 3% in generated
-  ones. New sessions are all generated, so the corpus balance shifts as it grows,
-  and pooled metrics shift with it. Report per source when it matters.
+  ones. That is a property of the corpus, not a reason to split the metrics: the
+  merged distribution is the defined evaluation target and per-source subsets are
+  too imbalanced to estimate anything (library has 18 negatives, generated has 1
+  positive). What it does mean is that the corpus balance shifts as generated
+  sessions accumulate — so record the mix, and re-check the balance table when it
+  moves materially.
 - **In-flow labels are noisier than reviewed ones.** The label-noise finding came
   from labels collected during editing. New sessions inherit that. Budget a
   verification pass for anything destined for an evaluation split, or treat
@@ -440,7 +484,7 @@ turn the label-stability argument from an inference into a demonstration.
 If the override rate turns out to be high, the pre-screening claim strengthens
 considerably: the panel's top flag agreeing with expert judgement is close to
 what a transcriber would actually want from the tool. If it turns out low, that
-is worth knowing before an expert study is designed around it.
+is worth knowing before the expert rating exercise is designed around it.
 
 And if the corpus grows enough to support a genuinely held-out *second* test set,
 every result here could be replicated rather than merely reported — which for a
@@ -449,6 +493,82 @@ strengthening thing available.
 
 None of this needs deciding now. The collection runs, the data accumulates, and
 these become answerable in the order the sample size allows.
+
+---
+
+## Reading the numbers — a short glossary
+
+Terms and figures used above, in plain language.
+
+### McNemar's test
+
+Two judges are scored on the *same* 915 decisions, so their accuracies are
+paired, not independent, and comparing them directly is invalid.
+
+McNemar discards every decision the two agree on and looks only at
+disagreements:
+
+- **b** = A wrong, B right — B's wins
+- **c** = A right, B wrong — B's losses
+
+If neither judge is better, a disagreement should fall either way like a coin
+toss, so `b` should roughly equal `c`. The test asks how surprising the observed
+split is. We use the **exact** binomial version because `b + c` is in the tens,
+where the usual chi-square approximation is unreliable.
+
+Example: VLM against always-clean gives `+209 / −64` — 273 disagreements, 209
+favouring the VLM, p < 0.0001.
+
+Why it matters: a judge can gain net-correct decisions purely by **flagging
+less**, shedding false positives while also losing true positives. Showing flips
+in both directions makes that visible instead of hiding it inside an accuracy.
+
+### "+122 decisions"
+
+A count of decisions, out of 183 — one per test pair, for a single option.
+
+On `missing_texture`, always-clean is right on 48/183 (only the genuinely clean
+pairs). The VLM is right on 170/183. The difference is **+122**. Likewise
+`missing_parts`: 115/183 versus 138/183 is **+23**.
+
+### The 5-bit label signature
+
+Each pair carries five yes/no labels, so its answers form a pattern like
+`10110` — 32 possible signatures. Val/test were balanced by grouping pairs by
+signature and dividing each group proportionally, rather than shuffling.
+Shuffling can leave one side with 41% `missing_parts` positives and the other
+with 31%; bucketing forces them to match. It also preserves *co-occurrence*,
+because a signature is a joint pattern rather than five separate marginals.
+
+### "Not pixel-registered"
+
+Overlay the photograph and the tactile rendering and nothing lines up. The
+tactile version is drawn afresh, not traced over the photo — different size,
+framing and shape. 278 of 300 sampled pairs do not even share an aspect ratio
+(one is 872×841 beside 176×287). Only the *content* corresponds, never the
+coordinates — which is why "crop the same region from both" is not a meaningful
+operation here.
+
+### "The weights are decorative"
+
+The ensemble flags when the weighted vote passes half. Five judges voting yes/no
+gives 2⁵ = 32 possible patterns; all 32 were enumerated. The two largest weights
+together never reach half the total, so two votes can never flag; the three
+smallest always exceed it, so three votes always flag. Nothing in between exists.
+Replacing every weight with 1.0 would produce identical behaviour.
+
+### GroupKFold
+
+155 edit steps came from only 82 sessions, because one session yields several
+steps as the same image is edited repeatedly. A random split would put step 1 in
+training and step 2 in testing — nearly the same image — and the model would
+score well by recognising it rather than generalising. GroupKFold keeps every
+step of a session on the same side of the split.
+
+### φ
+
+Pronounced "phi" (rhymes with *fly*). Here it names a function: φ(q) is the mean
+defect probability across the judges for image q.
 
 ---
 
