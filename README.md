@@ -65,8 +65,7 @@ formality: **286 labels changed**, 152 of them in test alone.
 
 **The splits are balanced against each other.** After verification the val/test
 boundary was re-derived by bucketing pairs on their 5-bit label signature and
-splitting each bucket proportionally, which cut the largest per-option gap
-between the two from 9.4% to **1.5%**.
+splitting each bucket proportionally.
 
 ### The label-noise finding
 
@@ -133,6 +132,33 @@ Per option, against always-clean, on the final fleet:
 | CLIP Probe | +82, p=0.0001 | `missing_texture` +116, `missing_parts` +18 | `broken_lines` −33 |
 | DINOv2 Probe | +49, p=0.0231 | `missing_texture` +109 | `too_thick` −18, `broken_lines` −39 |
 | ViT-B/16 | +34, p=0.0971 **n.s.** | `missing_texture` +90 | `too_thick` −16, `broken_lines` −33, `extra_parts` −19 |
+
+**How to read a row**, using the VLM. Over the 915 test decisions:
+
+```
+they agree on          642   <- ignored: both right, or both wrong
+they disagree on       273
+    VLM right, baseline wrong    209
+    baseline right, VLM wrong     64
+```
+
+The agreements say nothing about which judge is better, so the test discards
+them. **+145** is the net gain in decisions (743 correct versus the baseline's
+598). **p < 0.0001** answers a different question: *if the two were equally
+good, how often would chance alone split 273 disagreements this unevenly?* A
+coin would give roughly 136/137, not 209/64 — so the gap is not luck.
+
+Net and p measure different things. **Net is how much better; p is how sure.**
+A tiny improvement on a huge sample can have a spectacular p-value and still be
+useless, which is why both are shown.
+
+`ViT-B/16` is marked **n.s.** because p = 0.0971 — above the conventional 0.05
+threshold, so its +34 is consistent with chance.
+
+**The last column matters most.** A strong overall p-value hides per-option
+failures: ResNet-50 clears the baseline overall at p < 0.0001 yet is
+*significantly worse than answering "clean"* on `broken_lines`. The VLM is the
+only judge with nothing in that column.
 
 Every judge's win is carried by `missing_texture`. Strip that one option out and
 four of five are net *negative*. Three of five are **significantly worse than
@@ -434,13 +460,29 @@ the frozen v1 corpus in `generated_training_data/`. The v1 splits and
 untouched rather than moved — isolating the new data achieves the same
 separation with none of the breakage. Override with `TACTILE_COLLECT_DIR`.
 
-**Every iteration can now carry a full five-option label.** Previously only the
-final pair of a session was completely labelled; intermediate images carried a
-single inferred positive — the defect the annotator chose to target. That is an
-*action* label, not a diagnosis, and 37.5% of them were corrected on review. The
-"Label This Iteration" tab records all five options for the image currently
-shown, pre-filled from the evaluators and correctable, at any point in the edit
-loop. It is optional; skipping it leaves behaviour unchanged.
+**Every iteration is saved as a fully-labelled pair.** Previously only the final
+image of a session got a complete label; intermediates carried a single inferred
+positive — the defect the annotator chose to target. That is an *action* label,
+not a diagnosis, and 37.5% of them were corrected on review.
+
+The **Label & Save** tab is now the only save action: label the iteration on
+screen, press save, and the photograph plus that tactile rendering are written
+with all five options set. Save as many iterations of a session as are worth
+keeping; they share one folder. Writes are keyed on `pair_id`, so re-saving an
+iteration **corrects** its row rather than adding a contradictory second one.
+
+Each save produces:
+
+```
+pair_<ts>/natural.jpg          once per session
+pair_<ts>/tactile_iter<N>.jpg  the iteration labelled
+annotations.jsonl              one row per iteration, five labels
+sessions.jsonl                 edit log and fleet scores, keyed by session_id
+```
+
+The earlier format also wrote a `tactile.jpg` that was byte-identical to the last
+`tactile_iter*.jpg` and carried its own separate label row — the same image
+counted twice. That duplicate is gone.
 
 The threshold mode now defaults to **calibrated**, using per-option thresholds
 refitted on the val split for the current fleet. The flat 0.50 of balanced mode
