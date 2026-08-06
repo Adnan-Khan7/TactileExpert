@@ -48,10 +48,15 @@ def _build_result(per_option: dict) -> dict:
 class CLIPProbeEvaluator:
     """CLIP ViT-L/14 (laion2b_s32b_b82k) backbone + three 2-layer MLP task heads."""
 
+    # C4 (2026-07-30): QE was missing here while models/clip_probe/qe_evaluator.pt
+    # existed on disk — the head was never loaded, so extra_parts was silently
+    # absent from every score this class produced. Mirrors the deployed map in
+    # evaluators/clip_probe_eval.py:44-47; keep the two in step.
     _HEAD_CONFIGS = [
         ("QL", "ql_evaluator.pt", ["too_thick", "broken_lines"]),
         ("QP", "qp_evaluator.pt", ["missing_parts"]),
         ("QT", "qt_evaluator.pt", ["missing_texture"]),
+        ("QE", "qe_evaluator.pt", ["extra_parts"]),
     ]
 
     def __init__(self, models_dir: str | Path, device: str | None = None):
@@ -61,7 +66,11 @@ class CLIPProbeEvaluator:
         models_dir = Path(models_dir)
 
         print("[CLIPProbeEvaluator] Loading CLIP ViT-L/14 (laion2b_s32b_b82k)…")
-        self._clip, self._preprocess, _ = open_clip.create_model_and_transforms(
+        # Index 2 is the VAL transform (Resize + CenterCrop). Index 1 is the
+        # TRAIN transform, which contains RandomResizedCrop — taking it made
+        # inference nondeterministic: the same pair scored differently on every
+        # call. Matches evaluators/clip_probe_eval.py:63.
+        self._clip, _, self._preprocess = open_clip.create_model_and_transforms(
             "ViT-L-14", pretrained="laion2b_s32b_b82k", device=self.device)
         self._clip.eval()
 
@@ -71,7 +80,11 @@ class CLIPProbeEvaluator:
         for _dim, pt_name, options in self._HEAD_CONFIGS:
             ckpt = torch.load(models_dir / pt_name, map_location=self.device, weights_only=False)
             head = nn.Sequential(
-                nn.Linear(ckpt["input_dim"], ckpt["hidden_dim"]),
+                # v5 checkpoints store the feature width as "dim", not
+                # "input_dim" — the bare subscript raised KeyError against every
+                # deployed checkpoint, so this loader had been dead for some
+                # time. Same fallback as evaluators/clip_probe_eval.py:73.
+                nn.Linear(ckpt.get("input_dim", 768 * 3), ckpt["hidden_dim"]),
                 nn.BatchNorm1d(ckpt["hidden_dim"]),
                 nn.ReLU(),
                 nn.Dropout(0.3),
@@ -80,7 +93,11 @@ class CLIPProbeEvaluator:
             head.load_state_dict(ckpt["state_dict"])
             head.eval().to(self.device)
             self._heads[_dim] = (head, options)
-            cal = ckpt.get("calibrated_thresholds", {})
+            # The checkpoint key is "cal_thresholds". Reading
+            # "calibrated_thresholds" silently fell through to the module
+            # defaults — this is the same P0 audit bug already fixed in the
+            # deployed CLIP evaluator.
+            cal = ckpt.get("cal_thresholds", ckpt.get("calibrated_thresholds", {}))
             for opt in options:
                 self._thresholds[opt] = cal.get(opt, CLIP_THRESHOLDS.get(opt, 0.5))
 
@@ -166,21 +183,33 @@ class TwoStreamEvaluator:
             return nn.Sequential(
                 nn.Linear(cdim, 256), nn.ReLU(), nn.Dropout(0.3), nn.Linear(256, n_out))
 
+        # C4 (2026-07-30): QE (extra_parts) was missing from both the ModuleDict
+        # and the concat, so this class produced 4 outputs while the deployed
+        # checkpoints carry 4 heads covering 5 options. Mirrors HEAD_ORDER in
+        # evaluators/backbone_eval.py:23-29 — the concat must expand to exactly
+        # ALL_OPTIONS, in that order, or score_pair() mis-labels the columns.
+        _HEAD_ORDER = ["QL", "QP", "QT", "QE"]
+
         class _Net(nn.Module):
             def __init__(self_):
                 super().__init__()
                 self_.backbone = base
-                self_.heads = nn.ModuleDict({"QL": _head(2), "QP": _head(1), "QT": _head(1)})
+                self_.heads = nn.ModuleDict({
+                    "QL": _head(2), "QP": _head(1), "QT": _head(1), "QE": _head(1)})
 
             def forward(self_, nat, tac):
                 fn = self_.backbone(nat)
                 ft = self_.backbone(tac)
                 x  = torch.cat([fn, ft, fn - ft], dim=-1)
-                return torch.cat(
-                    [self_.heads["QL"](x), self_.heads["QP"](x), self_.heads["QT"](x)], dim=-1)
+                return torch.cat([self_.heads[d](x) for d in _HEAD_ORDER], dim=-1)
 
         self._model = _Net()
-        self._model.load_state_dict(ckpt["state_dict"])
+        # v2/v3 checkpoints carry a QN (non_conformant) head for an option that
+        # was removed; drop it rather than failing to load. Same filter as
+        # evaluators/backbone_eval.py:101-104.
+        _sd = {k: v for k, v in ckpt["state_dict"].items()
+               if not k.startswith("heads.QN")}
+        self._model.load_state_dict(_sd)
         self._model.eval().to(self.device)
         self._thresholds: dict[str, float] = ckpt.get(
             "calibrated_thresholds", {opt: 0.5 for opt in ALL_OPTIONS})
@@ -227,7 +256,11 @@ class VLMEvaluator:
 
     def __init__(
         self,
-        model_path: str = "Qwen/Qwen2-VL-2B-Instruct",
+        # C4 (2026-07-30): was 2B, but models/vlm_checkpoint is a 7B adapter
+        # (adapter_config.json base_model_name_or_path = Qwen2-VL-7B-Instruct).
+        # Loading that adapter onto a 2B base fails on dimension mismatch, so the
+        # old default could not work with the deployed checkpoint.
+        model_path: str = "Qwen/Qwen2-VL-7B-Instruct",
         lora_checkpoint: str | None = None,
         device: str | None = None,
         max_pixels: int = 200704,

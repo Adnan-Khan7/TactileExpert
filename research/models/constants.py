@@ -1,75 +1,50 @@
-"""Shared vocabulary and configuration for all TactileEval evaluators."""
+"""Compatibility shim — the real vocabulary lives in evaluators/constants.py.
 
-ALL_OPTIONS = ["too_thick", "broken_lines", "missing_parts", "missing_texture"]
+C4, 2026-07-30. This file used to be an independent 4-option copy:
 
-QUESTIONS = {
-    "broken_lines": (
-        "Does this tactile graphic contain broken or discontinuous outlines "
-        "where a fingertip tracing the edges would encounter gaps, "
-        "interruptions, or missing segments?"
-    ),
-    "too_thick": (
-        "Does this tactile graphic contain strokes that are excessively thick, "
-        "causing adjacent parts to merge or fine details to collapse into "
-        "solid areas?"
-    ),
-    "missing_texture": (
-        "Does this tactile graphic omit tactile texture fills that are present "
-        "in the reference image to distinguish different surfaces, materials, "
-        "or regions?"
-    ),
-    "missing_parts": (
-        "Does this tactile graphic omit any anatomical or structural parts "
-        "that are clearly present in the reference photograph?"
-    ),
-}
+    ALL_OPTIONS = ["too_thick", "broken_lines", "missing_parts", "missing_texture"]
 
-EDIT_INSTRUCTIONS = {
-    "broken_lines": (
-        "Restore continuous outlines: regenerate with stroke settings that avoid "
-        "embossing gaps, or post-process to close broken segments."
-    ),
-    "too_thick": (
-        "Thin the strokes: reduce line width so adjacent parts remain distinct "
-        "and fine details are preserved at embossed resolution."
-    ),
-    "missing_texture": (
-        "Add texture fills: apply distinct tactile patterns to differentiate "
-        "surface types and regions visible in the reference."
-    ),
-    "missing_parts": (
-        "Restore missing parts: regenerate or edit to include all anatomical "
-        "and structural elements visible in the reference photograph."
-    ),
-}
+`extra_parts` was absent entirely, and the `broken_lines` question was the
+pre-v3 wording rather than the outline-only text the deployed VLM was fine-tuned
+on. Everything importing this — research/review/{score_pipeline,apply_labels,
+prepare_inspection}.py and the research/ui/ shims — therefore worked over four
+options with a stale prompt, while the deployed fleet used five. Numbers produced
+through this path are not comparable to experiments_out/eval_current_fleet.json.
 
-DIMENSION_LABELS = {
-    "broken_lines":    "QL — Line Quality",
-    "too_thick":       "QL — Line Quality",
-    "missing_texture": "QT — Texture",
-    "missing_parts":   "QP — Part Completeness",
-}
+It now re-exports the deployed constants, so there is exactly ONE definition of
+the option vocabulary in the repo and the drift cannot recur. Loaded by file path
+rather than `from evaluators.constants import ...` because that executes
+evaluators/__init__.py, which imports torch — unwanted for CPU-only label tooling
+such as apply_labels.py.
 
-SYSTEM_PROMPT = (
-    "You are an expert evaluator of tactile graphics for blind and visually impaired learners. "
-    "Tactile graphics are embossed line drawings that users explore through touch. "
-    "You are shown two images: the first is a natural reference photograph and the second is "
-    "a generated tactile graphic. "
-    "Answer the quality assessment question with 'yes' or 'no' only."
-)
+NOTE for the label-verification pass: research/annotator/annotator.py does NOT
+import from here. It carries its own list (all five options plus the deprecated
+noisy_background and non_conformant), so it was never affected by this bug.
+"""
 
-# Val-calibrated thresholds from VLM Fine-tuned epoch 3
-VLM_THRESHOLDS = {
-    "broken_lines":    0.60,
-    "missing_parts":   0.25,
-    "missing_texture": 0.05,
-    "too_thick":       0.05,
-}
+import importlib.util as _ilu
+from pathlib import Path as _Path
 
-# Calibrated thresholds from CLIP Probe validation
-CLIP_THRESHOLDS = {
-    "too_thick":       0.75,
-    "broken_lines":    0.65,
-    "missing_parts":   0.50,
-    "missing_texture": 0.50,
-}
+_REPO_ROOT = _Path(__file__).resolve().parents[2]
+_CONSTANTS = _REPO_ROOT / "evaluators" / "constants.py"
+
+_spec = _ilu.spec_from_file_location("_tactile_deployed_constants", _CONSTANTS)
+_mod = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+
+ALL_OPTIONS = _mod.ALL_OPTIONS
+OPTION_DISPLAY = _mod.OPTION_DISPLAY
+QUESTIONS = _mod.QUESTIONS
+EDIT_INSTRUCTIONS = _mod.EDIT_INSTRUCTIONS
+DIMENSION_LABELS = _mod.DIMENSION_LABELS
+SYSTEM_PROMPT = _mod.SYSTEM_PROMPT
+
+# Threshold names kept under their historical spellings so existing imports in
+# research/models/evaluators.py and research/ui/vlm_evaluator.py keep working.
+VLM_THRESHOLDS = _mod.VLM_THRESHOLDS_CALIBRATED
+CLIP_THRESHOLDS = _mod.CLIP_THRESHOLDS_CALIBRATED
+
+__all__ = [
+    "ALL_OPTIONS", "OPTION_DISPLAY", "QUESTIONS", "EDIT_INSTRUCTIONS",
+    "DIMENSION_LABELS", "SYSTEM_PROMPT", "VLM_THRESHOLDS", "CLIP_THRESHOLDS",
+]
