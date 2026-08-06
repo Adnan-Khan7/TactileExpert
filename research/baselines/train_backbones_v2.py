@@ -394,6 +394,28 @@ def main():
     print("\nTest results:")
     print_metrics(test_res, "test")
 
+    # Per-option F1-max thresholds on VAL, stored in the checkpoint so the
+    # deployed evaluator does not fall back to a hardcoded dict fitted against
+    # some earlier fleet — which is exactly what ResNet/ViT did until now.
+    cal_thresholds = {}
+    vp, vy = [], []
+    model.eval()
+    with torch.no_grad():
+        for nat, tac, lbl, msk in val_loader:
+            pr = torch.sigmoid(model(nat.to(device), tac.to(device))).cpu().numpy()
+            vp.append(pr); vy.append(lbl.numpy())
+    vp = np.concatenate(vp); vy = np.concatenate(vy)
+    for i, opt in enumerate(ALL_OPTIONS):
+        s, y = vp[:, i], vy[:, i]
+        best, bf = 0.5, -1.0
+        for t in [round(0.05 * k, 2) for k in range(1, 20)]:
+            tp = int(((s > t) & (y > 0.5)).sum()); fp = int(((s > t) & (y <= 0.5)).sum())
+            fn = int(((s <= t) & (y > 0.5)).sum())
+            f = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) else 0.0
+            if f > bf: bf, best = f, t
+        cal_thresholds[opt] = best
+    print(f"  val F1-max thresholds: {cal_thresholds}")
+
     ckpt_path = out_dir / f"{args.backbone}_evaluator.pt"
     torch.save({
         "backbone":    args.backbone,
@@ -405,6 +427,7 @@ def main():
         "best_val_f1": best_f1,
         "all_options": ALL_OPTIONS,
         "task_heads":  {k: v for k, v in TASK_HEADS.items()},
+        "cal_thresholds": cal_thresholds,
         "test_results": test_res,
     }, ckpt_path)
     print(f"\nSaved → {ckpt_path}")

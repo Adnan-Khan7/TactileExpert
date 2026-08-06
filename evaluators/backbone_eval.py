@@ -97,6 +97,16 @@ class BackboneEvaluator:
 
         print(f"[{backbone_name}] Loading from {ckpt_path.name}…")
         ckpt  = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+
+        # Prefer thresholds stored by the training run. The constants dict is a
+        # fallback only: it was fitted against an earlier fleet, so a checkpoint
+        # trained on new data must not silently inherit it.
+        stored = ckpt.get("cal_thresholds") or {}
+        if stored:
+            self.calibrated_thresholds.update(stored)
+        else:
+            print(f"[{backbone_name}] no cal_thresholds in checkpoint — "
+                  f"falling back to constants.py (may predate this fleet)")
         model = _build_model(backbone_name)
         # v2/v3 checkpoints carry a QN (non_conformant) head — option removed
         # from the taxonomy, so its weights are dropped here.
