@@ -32,7 +32,10 @@ mkdir -p logs
 
 # Step 1 — build VQA dataset from new annotations (fast, CPU only)
 echo "Building VQA v2 dataset..."
-python "$REPO/research/vlm/build_vqa_v2.py"
+# Pinned to splits_v2/vqa_v2: this is a HISTORICAL run kept reproducible.
+# build_vqa_v2.py now defaults to the v1 unified splits.
+python "$REPO/research/vlm/build_vqa_v2.py" \
+    --splits-dir data/splits_v2 --out-dir data/vqa_v2
 
 # Step 2 — fine-tune VLM on new data, save to output_v2/
 echo "Fine-tuning Qwen2-VL-2B..."

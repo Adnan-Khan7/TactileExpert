@@ -21,6 +21,8 @@ export HF_HOME=$SCRATCH/hf_cache
 export TRANSFORMERS_CACHE=$SCRATCH/hf_cache
 export PYTHONUNBUFFERED=1
 
+set -e
+
 # Args are forwarded — e.g. for the candidate deploy gate:
 #   sbatch run_eval_full.sh --vlm-ckpt <dir> --out <json>
 python "$REPO/research/experiments/eval_full_v4.py" "$@"

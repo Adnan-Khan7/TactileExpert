@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Train ResNet-50 / ViT-B/16 two-stream evaluator on data/splits_v2 (5 options).
+Train ResNet-50 / ViT-B/16 two-stream evaluator on data/splits_v3_unified (5 options).
 
 Four task heads (QN/non_conformant dropped from the taxonomy — legacy
 checkpoints containing a QN head are still loadable by the evaluator):
@@ -12,13 +12,12 @@ checkpoints containing a QN head are still loadable by the evaluator):
 Backbone is fine-tuned end-to-end (low lr) while heads use a higher lr.
 Loss: masked BCE with pos_weight per option for class imbalance.
 
-Saves to:
-  TactileEval_Context_And_Data/models/resnet50_v2/resnet50_evaluator.pt
-  TactileEval_Context_And_Data/models/vit_b16_v2/vit_b_16_evaluator.pt
+Saves to <--model-dir>/{resnet50,vit_b16}/ — directory names match what
+evaluators/backbone_eval.py resolves, so installing a fleet is a copy.
 
 Usage:
-  python code/baselines/train_backbones_v2.py --backbone resnet50
-  python code/baselines/train_backbones_v2.py --backbone vit_b_16
+  python research/baselines/train_backbones_v2.py --backbone resnet50 --seed 42
+  python research/baselines/train_backbones_v2.py --backbone vit_b_16 --seed 42
 """
 
 import sys
@@ -34,8 +33,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import random
+
 import torchvision.models as tvm
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -47,7 +49,7 @@ except ImportError:
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT       = DATA_ROOT
-DATA_DIR   = ROOT / "data" / "splits_v2"
+DATA_DIR   = ROOT / "data" / "splits_v3_unified"
 IMAGE_ROOT = ROOT / "images"
 MODELS_DIR = ROOT / "TactileEval_Context_And_Data" / "models"
 
@@ -62,25 +64,95 @@ ALL_OPTIONS = [o for opts in TASK_HEADS.values() for o in opts]
 HEAD_ORDER  = ["QL", "QP", "QT", "QE"]
 
 
+def set_seed(seed: int):
+    """Seed every RNG the run touches.
+
+    These trainers previously seeded nothing, so two runs on identical data
+    differed by whatever the shuffle order and weight init happened to be. That
+    made small deltas between checkpoints unreadable: a macro-F1 move of a few
+    points could be a real effect or could be the seed. Fixing the seed makes a
+    single run reproducible; VARYING it deliberately across runs is what gives
+    the noise floor a comparison has to clear.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 # ── Transforms ────────────────────────────────────────────────────────────────
 def get_transforms(train: bool) -> T.Compose:
-    if train:
-        return T.Compose([
-            T.Resize(256), T.RandomCrop(224), T.RandomHorizontalFlip(),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+    """Deterministic tail, identical for train and eval.
+
+    NOTE: this is applied to the natural and the tactile image SEPARATELY, so it
+    must contain no random step. Random augmentation is sampled once per PAIR in
+    paired_augment() below.
+    """
     return T.Compose([
-        T.Resize(256), T.CenterCrop(224),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
 
+def paired_augment(nat: Image.Image, tac: Image.Image, train: bool,
+                   independent: bool = False):
+    """Geometry for one pair: resize, crop, flip — sampled ONCE, applied to both.
+
+    Why this is not a plain torchvision Compose: the label is a statement about
+    the RELATIONSHIP between the two images ("does the tactile omit a part the
+    photo shows"). Previously the train transform carried RandomCrop and
+    RandomHorizontalFlip and was called once per image, so each image drew its
+    own crop and its own mirror. That let a crop delete a structure from the
+    tactile while leaving it in the photo — manufacturing a `missing_parts`
+    positive that the label does not agree with — and mirrored roughly half of
+    all pairs against each other. Val/test used the deterministic path, so the
+    model trained under one regime and was scored under another.
+
+    The pair is NOT pixel-registered: 278 of 300 sampled pairs have different
+    aspect ratios (the tactile is a re-rendering, not an overlay). So a shared
+    crop BOX is meaningless. What is shared instead is the crop POSITION as a
+    fraction of each image's own frame, plus the flip decision — which keeps the
+    two views framed consistently without pretending they are aligned.
+    """
+    nat = TF.resize(nat, 256)
+    tac = TF.resize(tac, 256)
+    if not train:
+        return TF.center_crop(nat, 224), TF.center_crop(tac, 224)
+
+    def place(img, u, v):
+        w, h = img.size
+        i = int(round(v * max(h - 224, 0)))
+        j = int(round(u * max(w - 224, 0)))
+        return TF.crop(img, i, j, 224, 224)
+
+    if independent:
+        # Reproduces the ORIGINAL behaviour for the ablation: geometry drawn
+        # separately per image, so ~half of all pairs end up mirrored against
+        # each other. Kept behind a flag rather than deleted, so the arm-A
+        # results stay reproducible without git archaeology.
+        out = []
+        for img in (nat, tac):
+            img = place(img, random.random(), random.random())
+            if random.random() < 0.5:
+                img = TF.hflip(img)
+            out.append(img)
+        return out[0], out[1]
+
+    u, v = random.random(), random.random()          # one position per pair
+    do_flip = random.random() < 0.5                  # one flip per pair
+    nat, tac = place(nat, u, v), place(tac, u, v)
+    if do_flip:
+        nat, tac = TF.hflip(nat), TF.hflip(tac)
+    return nat, tac
+
+
 # ── Dataset ───────────────────────────────────────────────────────────────────
 class TactilePairDataset(Dataset):
-    def __init__(self, jsonl_path: Path, transform: T.Compose):
+    def __init__(self, jsonl_path: Path, transform: T.Compose, train: bool = False,
+                 independent_aug: bool = False):
         self.transform = transform
+        self.train = train
+        self.independent_aug = independent_aug
         pair_data: dict = defaultdict(lambda: {
             "natural_image": None, "tactile_image": None,
             "labels": {opt: None for opt in ALL_OPTIONS},
@@ -100,8 +172,12 @@ class TactilePairDataset(Dataset):
 
     def __getitem__(self, idx):
         p   = self.pairs[idx]
-        nat = self.transform(Image.open(IMAGE_ROOT / p["natural_image"]).convert("RGB"))
-        tac = self.transform(Image.open(IMAGE_ROOT / p["tactile_image"]).convert("RGB"))
+        nat_img = Image.open(IMAGE_ROOT / p["natural_image"]).convert("RGB")
+        tac_img = Image.open(IMAGE_ROOT / p["tactile_image"]).convert("RGB")
+        nat_img, tac_img = paired_augment(nat_img, tac_img, self.train,
+                                          independent=self.independent_aug)
+        nat = self.transform(nat_img)
+        tac = self.transform(tac_img)
         labels = torch.zeros(len(ALL_OPTIONS))
         masks  = torch.zeros(len(ALL_OPTIONS))
         for i, opt in enumerate(ALL_OPTIONS):
@@ -211,6 +287,17 @@ def print_metrics(res, label=""):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backbone",    required=True, choices=["resnet50", "vit_b_16"])
+    parser.add_argument("--splits-dir",  default=None,
+                        help=f"split directory (default: {DATA_DIR})")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="RNG seed; vary it to measure run-to-run variance")
+    parser.add_argument("--independent-aug", action="store_true",
+                        help="draw crop/flip separately per image (the original, "
+                             "buggy behaviour) — for reproducing ablation arm A")
+    parser.add_argument("--model-dir",   default=None,
+                        help=f"checkpoint output root (default: {MODELS_DIR}). "
+                             "The default is the fleet the app loads; pass this to train "
+                             "an ablation arm without replacing it.")
     parser.add_argument("--epochs",      type=int,   default=30)
     parser.add_argument("--batch-size",  type=int,   default=16)
     parser.add_argument("--lr-backbone", type=float, default=1e-4)
@@ -219,20 +306,26 @@ def main():
     parser.add_argument("--device",
                         default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    set_seed(args.seed)
 
-    bb_slug = args.backbone.replace("_", "")
-    out_dir = MODELS_DIR / f"{bb_slug}_v2"
+    # Directory names match what evaluators/backbone_eval.py resolves, so
+    # installing a trained fleet is a copy rather than a rename.
+    DEPLOY_DIR = {"resnet50": "resnet50", "vit_b_16": "vit_b16"}
+    data_dir = Path(args.splits_dir) if args.splits_dir else DATA_DIR
+    models_root = Path(args.model_dir) if args.model_dir else MODELS_DIR
+    out_dir  = models_root / DEPLOY_DIR[args.backbone]
     out_dir.mkdir(parents=True, exist_ok=True)
-    device  = torch.device(args.device)
+    device   = torch.device(args.device)
 
     print(f"\n{'='*60}")
     print(f"  backbone={args.backbone}  options={ALL_OPTIONS}")
-    print(f"  data: {DATA_DIR}  save: {out_dir}")
+    print(f"  data: {data_dir}  save: {out_dir}")
     print(f"{'='*60}\n")
 
-    train_ds = TactilePairDataset(DATA_DIR/"train.jsonl", get_transforms(True))
-    val_ds   = TactilePairDataset(DATA_DIR/"val.jsonl",   get_transforms(False))
-    test_ds  = TactilePairDataset(DATA_DIR/"test.jsonl",  get_transforms(False))
+    train_ds = TactilePairDataset(data_dir/"train.jsonl", get_transforms(True),  train=True,
+                                  independent_aug=args.independent_aug)
+    val_ds   = TactilePairDataset(data_dir/"val.jsonl",   get_transforms(False), train=False)
+    test_ds  = TactilePairDataset(data_dir/"test.jsonl",  get_transforms(False), train=False)
 
     print(f"Pairs: train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
 
@@ -304,6 +397,9 @@ def main():
     ckpt_path = out_dir / f"{args.backbone}_evaluator.pt"
     torch.save({
         "backbone":    args.backbone,
+        "splits_dir":  str(data_dir),
+        "seed":        args.seed,
+        "independent_aug": bool(args.independent_aug),
         "state_dict":  best_state,
         "best_epoch":  best_epoch,
         "best_val_f1": best_f1,

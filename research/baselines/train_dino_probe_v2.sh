@@ -32,13 +32,25 @@ export TACTILE_DATA_ROOT="${TACTILE_DATA_ROOT:-$HOME/vlm_finetune}"
 cd "$TACTILE_DATA_ROOT"
 mkdir -p logs
 
+# Without this a crashed trainer still exits 0 (the trailing echo succeeds)
+# and sacct reports COMPLETED — a silent failure that looks like a result.
+set -e
+
+# extra args are forwarded to every trainer invocation (e.g. --seed 7)
+EXTRA_ARGS=("$@")
+
 # Feature extraction happens once (shared cache across all dims).
 # QL goes first — caches train/val/test features for all subsequent dims.
 # QN (non_conformant) excluded — removed from pipeline per advisor feedback.
 # QT uses higher gamma_neg=8 to suppress missing_texture false positives.
-python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QL
-python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QP
-python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QT --gamma-neg 8.0
-python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QE
+SPLITS="$TACTILE_DATA_ROOT/data/splits_v3_unified"
+# Overridable so an ablation arm trains without clobbering the main fleet:
+#   sbatch --export=ALL,MODELS_OUT=<dir> train_dino_probe_v2.sh
+DINO_V1="${MODELS_OUT:-$TACTILE_DATA_ROOT/TactileEval_Context_And_Data/models_v1}/dino_probe"
+
+python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QL --splits-dir "$SPLITS" --model-dir "$DINO_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QP --splits-dir "$SPLITS" --model-dir "$DINO_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QT --gamma-neg 8.0 --splits-dir "$SPLITS" --model-dir "$DINO_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_dino_probe_v2.py" --dim QE --splits-dir "$SPLITS" --model-dir "$DINO_V1" "${EXTRA_ARGS[@]}"
 
 echo "Finished: $(date)"

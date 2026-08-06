@@ -1,12 +1,16 @@
-"""Full evaluation of the freshly trained (v4) fleet for the README tables.
+"""Score the whole fleet on a split and print per-option F1 / AUC.
 
-Scores all 5 new checkpoints on:
-  - the original 153-pair test set  -> per-option F1 (t=0.50) + AUC
-  - the frozen GPT-domain holdout   -> correct flag decisions
-Then derives ENSEMBLE_WEIGHTS from the new per-option original-test F1s,
-applies the weighted-vote ensemble to both sets, and prints:
-  - README-ready markdown tables (F1, AUC, holdout) incl. Ensemble column
-  - a paste-ready ENSEMBLE_WEIGHTS dict for evaluators/constants.py
+Loads the four vision judges plus the VLM from TactileExpert/models/, scores
+every pair on every option, and writes per-pair probabilities to JSON so
+mcnemar_gate.py can run paired significance without re-scoring.
+
+Reports PER OPTION. Aggregate accuracy is degenerate here: the always-clean
+constant scores ~65%, so a single figure cannot separate a useful judge from a
+judge that never flags.
+
+Usage:
+  python research/experiments/eval_full_v4.py --splits test \
+      --base-model Qwen/Qwen2-VL-7B-Instruct --out experiments_out/eval_v1_fleet.json
 """
 
 import sys
@@ -25,9 +29,8 @@ import torch
 sys.path.insert(0, str(REPO_ROOT))
 
 HOME = Path.home()
-SPLITS = DATA_ROOT / "data/splits_v2"
+SPLITS = DATA_ROOT / "data/splits_v3_unified"
 IMG_ROOT = DATA_ROOT / "images"
-NEW = DATA_ROOT / "TactileEval_Context_And_Data/models"
 # Default = the DEPLOYED VLM. Override with --vlm-ckpt to gate a candidate
 # checkpoint against the deployed probes/backbones before deploying it.
 VLM_CKPT = REPO_ROOT / "models/vlm_checkpoint"
@@ -138,8 +141,11 @@ def score_all(pairs_by_split, base_model="Qwen/Qwen2-VL-2B-Instruct"):
 
 
 def main():
-    global VLM_CKPT, OUT
+    global VLM_CKPT, OUT, SPLITS
     parser = argparse.ArgumentParser()
+    parser.add_argument("--splits-dir", type=str, default=None)
+    parser.add_argument("--splits", nargs="+", default=["test"],
+                        help="splits to score (v1 has no gpt_test)")
     parser.add_argument("--vlm-ckpt", type=str, default=None,
                         help="LoRA checkpoint dir to evaluate instead of the "
                              "deployed models/vlm_checkpoint (deploy gate)")
@@ -155,19 +161,24 @@ def main():
     if args.out:
         OUT = Path(args.out)
 
-    pairs_by_split = {"test": load_split("test"), "gpt_test": load_split("gpt_test")}
+    if args.splits_dir:
+        SPLITS = Path(args.splits_dir)
+    print(f"labels: {SPLITS}", flush=True)
+
+    pairs_by_split = {s: load_split(s) for s in args.splits}
     for s, p in pairs_by_split.items():
         print(f"{s}: {len(p)} pairs", flush=True)
 
     results = score_all(pairs_by_split, base_model=args.base_model)
 
-    # per-model per-option F1/AUC on original test → ensemble weights
-    test = pairs_by_split["test"]
+    # per-model per-option F1/AUC on the primary split
+    primary = args.splits[0]
+    test = pairs_by_split[primary]
     order = sorted(test)
     metrics = {m: {} for m in MODELS}
     for m in MODELS:
         for o in OPTS:
-            scores = [results["test"][m][pid][o] for pid in order]
+            scores = [results[primary][m][pid][o] for pid in order]
             labels = [test[pid]["labels"][o] for pid in order]
             metrics[m][o] = {"f1": f1([s > 0.5 for s in scores], labels),
                              "auc": auc(scores, labels)}
@@ -215,33 +226,30 @@ def main():
     print(f"| **Macro AUC** | " + " | ".join(cell(sum(macro_auc[m]) / 5) for m in MODELS)
           + f" | {cell(sum(macro_ea) / 5)} |")
 
-    print("\n### GPT-domain holdout (correct flags)\n")
-    gt = pairs_by_split["gpt_test"]; gorder = sorted(gt)
-    n = len(gorder) * len(OPTS)
-    cells = []
-    for m in MODELS:
-        c = sum((results["gpt_test"][m][pid][o] > 0.5) == bool(gt[pid]["labels"][o])
-                for pid in gorder for o in OPTS)
-        cells.append(f"{c}/{n}")
-    ce = sum(ens["gpt_test"][pid][o]["flag"] == bool(gt[pid]["labels"][o])
-             for pid in gorder for o in OPTS)
-    cells.append(f"{ce}/{n}")
-    print("| | " + " | ".join(["CLIP Probe", "VLM", "ResNet-50", "ViT-B/16", "DINOv2 Probe", "Ensemble"]) + " |")
-    print("|---|" + ":---:|" * 6)
-    print("| Correct / total | " + " | ".join(cells) + " |")
+    # The GPT-domain holdout table is gone with the two-corpus regime. It
+    # reported raw correct-flag counts on a set with 8 positives in 150
+    # decisions, where a judge that answered "clean" to everything scored
+    # 142/150. Significance now comes from mcnemar_gate.py --vs-always-clean.
+    n_dec = len(order) * len(OPTS)
+    n_pos = sum(int(bool(test[pid]["labels"][o])) for pid in order for o in OPTS)
+    print(f"\n### {primary}: {len(order)} pairs, {n_dec} decisions, "
+          f"{n_pos} positive ({n_pos/n_dec:.1%})")
+    print(f"    always-clean baseline: {n_dec-n_pos}/{n_dec} ({1-n_pos/n_dec:.1%})")
 
-    print("\n### ENSEMBLE_WEIGHTS (paste into constants.py)\n")
-    print("ENSEMBLE_WEIGHTS = {")
+    # NOT paste-ready. Deployed ENSEMBLE_WEIGHTS come from rederive_fleet.py,
+    # which fits on TRAIN-SPLIT SESSIONS ONLY. These are F1 on the evaluation
+    # split — pasting them into constants.py would fit the combiner on test.
+    print("\n### per-option F1 (internal ensemble weighting only — NOT for constants.py)")
     for o in OPTS:
-        entries = ", ".join(f'"{m}": {weights[o][m]}' for m in MODELS)
-        print(f'    "{o}": {{{entries}}},')
-    print("}")
+        print(f'    {o:<18} ' + "  ".join(f"{m}={weights[o][m]}" for m in MODELS))
+    print("\n    Deployed weights: research/experiments/rederive_fleet.py")
 
     OUT.parent.mkdir(exist_ok=True)
-    OUT.write_text(json.dumps({"metrics": {m: {o: metrics[m][o] for o in OPTS} for m in MODELS},
-                               "weights": weights,
-                               "results": results,
-                               "holdout_correct": dict(zip(MODELS + ["Ensemble"], cells))},
+    OUT.write_text(json.dumps({"splits_dir": str(SPLITS),
+                               "splits": args.splits,
+                               "metrics": {m: {o: metrics[m][o] for o in OPTS} for m in MODELS},
+                               "weights_internal_do_not_deploy": weights,
+                               "results": results},
                               indent=2, default=float))
     print(f"\nsaved → {OUT}")
 

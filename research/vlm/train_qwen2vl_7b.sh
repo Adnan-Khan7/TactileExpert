@@ -42,14 +42,17 @@ export TACTILE_DATA_ROOT="${TACTILE_DATA_ROOT:-$HOME/vlm_finetune}"
 cd "$TACTILE_DATA_ROOT"
 mkdir -p logs
 
-echo "Building VQA v2 dataset from merged splits (idempotent)..."
-python "$REPO/research/vlm/build_vqa_v2.py"
+echo "Building VQA dataset from the v1 unified splits (idempotent)..."
+python "$REPO/research/vlm/build_vqa_v2.py" \
+    --splits-dir data/splits_v3_unified --out-dir data/vqa_v3_unified
 
-echo "Fine-tuning Qwen2-VL-7B (judge-capacity experiment)..."
+# out-dir is output_7b_v1, NOT output_7b: output_7b is the incumbent and is
+# needed as the comparison arm in mcnemar_gate.py.
+echo "Fine-tuning Qwen2-VL-7B on v1..."
 python "$REPO/research/vlm/step9_finetune_vlm.py" \
     --model-path Qwen/Qwen2-VL-7B-Instruct \
-    --vqa-dir data/vqa_v2 \
-    --out-dir output_7b \
+    --vqa-dir data/vqa_v3_unified \
+    --out-dir output_7b_v1 \
     --seed 43 \
     --patience 5 \
     --epochs 10 \

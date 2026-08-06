@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Build VQA dataset for VLM fine-tuning from data/splits_v2 (6 options).
+Build VQA dataset for VLM fine-tuning from data/splits_v3_unified (5 options).
 
 Key differences from step8_build_vqa_dataset.py:
-  - Source: data/splits_v2/ (human-verified labels, no vote_fraction)
+  - Source: the unified splits (human-verified labels, no vote_fraction)
   - No HC filtering needed — all records already manually verified
-  - Includes extra_parts and non_conformant (previously skipped)
-  - Negative downsampling still applied (missing_texture is 83% positive)
-  - noisy_background excluded (only 22 positives, insufficient)
+  - Includes extra_parts (previously skipped)
+  - Negative downsampling still applied (missing_texture is ~66-73% positive)
+  - noisy_background and non_conformant are RETIRED — not in ALL_OPTIONS, not
+    scored by any evaluator, and stripped from the splits by
+    research/annotator/apply_verified_labels.py
 
-Output: data/vqa_v2/{train,val,test}.jsonl + dataset_stats.json
+Output: data/vqa_v3_unified/{train,val,test}.jsonl + dataset_stats.json
 
 Usage:
-  python code/vlm/build_vqa_v2.py
+  python research/vlm/build_vqa_v2.py
+  python research/vlm/build_vqa_v2.py --splits-dir data/splits_v2 --out-dir data/vqa_v2
 """
 
 import sys
@@ -20,22 +23,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _paths import DATA_ROOT, REPO_ROOT  # noqa: E402
 
+import argparse
 import json
 import random
 from collections import defaultdict
 from pathlib import Path
 
 ROOT       = DATA_ROOT
-SRC_DIR    = ROOT / "data" / "splits_v2"
-OUT_DIR    = ROOT / "data" / "vqa_v2"
+SRC_DIR    = ROOT / "data" / "splits_v3_unified"
+OUT_DIR    = ROOT / "data" / "vqa_v3_unified"
 IMAGE_ROOT = ROOT / "images"
 
 ACTIVE_OPTIONS = [
     "too_thick", "broken_lines", "missing_parts", "missing_texture",
-    "extra_parts", "non_conformant",
+    "extra_parts",
 ]
 
-MAX_NEG_RATIO = 3   # cap negatives at 3x positives per option per split
+MAX_NEG_RATIO = 3   # cap negatives at 3x positives per option
+# Splits the cap applies to. TRAIN ONLY by default: capping negatives is a
+# class-balancing choice for LEARNING, and has no business touching the sets a
+# model is selected on or measured against. Capping val/test previously (a) made
+# the VLM's numbers incomparable to the vision judges, which read the splits
+# uncapped, and (b) inflated the apparent positive rate of the two rarest
+# options during early stopping — too_thick 14.4% -> 25.0%, broken_lines
+# 20.7% -> 25.0% — so the checkpoint was chosen under a distribution the model
+# never sees at inference.
+DOWNSAMPLE_SPLITS = {"train"}
 RANDOM_SEED   = 42
 
 # ── BANA-aligned question phrasing ────────────────────────────────────────────
@@ -103,14 +116,41 @@ def build_message(nat_rel: str, tac_rel: str, question: str, answer: str) -> lis
     ]
 
 
+def _resolve(p: str) -> Path:
+    """Relative paths resolve against the workspace, not the cwd."""
+    path = Path(p)
+    return path if path.is_absolute() else ROOT / path
+
+
 def main():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    global DOWNSAMPLE_SPLITS
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--splits-dir", default=None,
+                    help=f"source split directory (default: {SRC_DIR})")
+    ap.add_argument("--downsample", nargs="*", default=None,
+                    help=f"splits to cap negatives on (default: {sorted(DOWNSAMPLE_SPLITS)}); "
+                         "pass with no values to disable capping entirely")
+    ap.add_argument("--out-dir", default=None,
+                    help=f"output VQA directory (default: {OUT_DIR})")
+    args = ap.parse_args()
+
+    if args.downsample is not None:
+        DOWNSAMPLE_SPLITS = set(args.downsample)
+    src_dir = _resolve(args.splits_dir) if args.splits_dir else SRC_DIR
+    out_dir = _resolve(args.out_dir) if args.out_dir else OUT_DIR
+
+    out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(RANDOM_SEED)
+
+    print(f"source: {src_dir}")
+    print(f"output: {out_dir}")
+    print(f"options: {ACTIVE_OPTIONS}")
+    print(f"negative cap {MAX_NEG_RATIO}x applied to: {sorted(DOWNSAMPLE_SPLITS) or 'nothing'}\n")
 
     all_stats = {}
 
     for split in ["train", "val", "test"]:
-        src = SRC_DIR / f"{split}.jsonl"
+        src = src_dir / f"{split}.jsonl"
         records_by_opt: dict[str, list] = defaultdict(list)
 
         with open(src) as f:
@@ -127,10 +167,11 @@ def main():
             pos   = [r for r in recs if r["label"] == 1]
             neg   = [r for r in recs if r["label"] == 0]
 
-            # Cap negatives to avoid always-no bias
-            max_neg = len(pos) * MAX_NEG_RATIO
-            if len(neg) > max_neg:
-                neg = rng.sample(neg, max_neg)
+            # Cap negatives to avoid always-no bias — training splits only.
+            if split in DOWNSAMPLE_SPLITS:
+                max_neg = len(pos) * MAX_NEG_RATIO
+                if len(neg) > max_neg:
+                    neg = rng.sample(neg, max_neg)
 
             opt_stats[opt] = {"pos": len(pos), "neg": len(neg),
                               "total": len(pos) + len(neg)}
@@ -157,7 +198,7 @@ def main():
 
         rng.shuffle(out_records)
 
-        out_path = OUT_DIR / f"{split}.jsonl"
+        out_path = out_dir / f"{split}.jsonl"
         with open(out_path, "w") as f:
             for r in out_records:
                 f.write(json.dumps(r) + "\n")
@@ -171,11 +212,13 @@ def main():
                   f"total={s['total']:4d}")
         print()
 
-    with open(OUT_DIR / "dataset_stats.json", "w") as f:
+    all_stats["_source"] = {"splits_dir": str(src_dir), "options": ACTIVE_OPTIONS,
+                            "seed": RANDOM_SEED, "max_neg_ratio": MAX_NEG_RATIO}
+    with open(out_dir / "dataset_stats.json", "w") as f:
         json.dump(all_stats, f, indent=2)
 
-    print(f"Wrote VQA dataset → {OUT_DIR}/")
-    print("Next: sbatch code/vlm/train_qwen2vl_v2.sh")
+    print(f"Wrote VQA dataset → {out_dir}/")
+    print(f"Next: sbatch research/vlm/train_qwen2vl_7b.sh  (--vqa-dir {out_dir.name})")
 
 
 if __name__ == "__main__":

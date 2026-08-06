@@ -29,12 +29,25 @@ export TACTILE_DATA_ROOT="${TACTILE_DATA_ROOT:-$HOME/vlm_finetune}"
 cd "$TACTILE_DATA_ROOT"
 mkdir -p logs
 
-# Train all 4 heads on splits_v2 data (QN/non_conformant removed from taxonomy)
-# QL and QT share CLIP features, so features are cached after the first head —
-# subsequent heads in the same dim/cache folder skip re-extraction.
-python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QL
-python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QP
-python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QT
-python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QE
+# Without this a crashed trainer still exits 0 (the trailing echo succeeds)
+# and sacct reports COMPLETED — a silent failure that looks like a result.
+set -e
+
+# extra args are forwarded to every trainer invocation (e.g. --seed 7)
+EXTRA_ARGS=("$@")
+
+# Train all 4 heads on splits_v3_unified (the v1 dataset).
+# Feature caches are namespaced by split directory, so the splits_v2 caches on
+# disk cannot be picked up — they hold splits_v2 LABELS as well as features.
+# --model-dir is REQUIRED: the default is the deployed fleet's only backup.
+SPLITS="$TACTILE_DATA_ROOT/data/splits_v3_unified"
+# Overridable so an ablation arm trains without clobbering the main fleet:
+#   sbatch --export=ALL,MODELS_OUT=<dir> train_clip_heads_v2.sh
+CLIP_V1="${MODELS_OUT:-$TACTILE_DATA_ROOT/TactileEval_Context_And_Data/models_v1}/clip_probe"
+
+python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QL --splits-dir "$SPLITS" --model-dir "$CLIP_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QP --splits-dir "$SPLITS" --model-dir "$CLIP_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QT --splits-dir "$SPLITS" --model-dir "$CLIP_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_clip_heads_v2.py" --dim QE --splits-dir "$SPLITS" --model-dir "$CLIP_V1" "${EXTRA_ARGS[@]}"
 
 echo "Finished: $(date)"

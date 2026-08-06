@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Train CLIP Probe heads on the data/splits_v2 dataset (5 options).
+Train CLIP Probe heads on the data/splits_v3_unified dataset (5 options).
 
 Four heads (QN/non_conformant dropped from the taxonomy):
   QL  — too_thick, broken_lines
@@ -8,12 +8,13 @@ Four heads (QN/non_conformant dropped from the taxonomy):
   QT  — missing_texture
   QE  — extra_parts
 
-Saves to:  TactileEval_Context_And_Data/models/clip_probe_v2/
-(old clip_probe/ models are untouched until you're ready to swap)
+Saves to <--model-dir>/, one checkpoint per dim. Features are cached under
+--cache-dir (default: alongside --model-dir); several seeds can share one cache
+because features depend on the images, not the seed.
 
-Usage — one head at a time (run via train_clip_heads_v2.sh for all):
-  python code/baselines/train_clip_heads_v2.py --dim QL
-  python code/baselines/train_clip_heads_v2.py --dim QE
+Usage — one head at a time (run via train_clip_heads_v2.sh for all four):
+  python research/baselines/train_clip_heads_v2.py --dim QL --seed 42
+  python research/baselines/train_clip_heads_v2.py --dim QE --seed 42
 """
 
 import sys
@@ -25,6 +26,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+import random
 
 import numpy as np
 import torch
@@ -42,7 +45,7 @@ import open_clip
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT       = DATA_ROOT
-DATA_DIR   = ROOT / "data" / "splits_v2"
+DATA_DIR   = ROOT / "data" / "splits_v3_unified"
 MODEL_DIR  = ROOT / "TactileEval_Context_And_Data" / "models" / "clip_probe_v2"
 IMAGE_ROOT = ROOT / "images"
 
@@ -58,6 +61,22 @@ DIMENSION_OPTIONS = {
     "QT": ["missing_texture"],
     "QE": ["extra_parts"],
 }
+
+
+def set_seed(seed: int):
+    """Seed every RNG the run touches.
+
+    These trainers previously seeded nothing, so two runs on identical data
+    differed by whatever the shuffle order and weight init happened to be. That
+    made small deltas between checkpoints unreadable: a macro-F1 move of a few
+    points could be a real effect or could be the seed. Fixing the seed makes a
+    single run reproducible; VARYING it deliberately across runs is what gives
+    the noise floor a comparison has to clear.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 # ── Asymmetric Loss ───────────────────────────────────────────────────────────
@@ -89,20 +108,43 @@ class PairDataset(Dataset):
             all_recs = [json.loads(l) for l in f if l.strip()]
         self.records = [r for r in all_recs if r["option_id"] in options]
 
+        # Cache FEATURES only, never labels. Features depend on the images;
+        # labels change every time a verification pass lands. Caching them
+        # together means a relabelled split silently trains on stale labels,
+        # because the cache key (the split directory) has not changed.
+        # The fingerprint pins the record IDENTITY and order, so the cached
+        # feature rows still line up; labels and masks are rebuilt every run.
         cache_path = Path(cache_path) if cache_path else None
+        fp = self._fingerprint()
+        self.feats = None
         if cache_path and cache_path.exists():
-            d = np.load(cache_path)
-            self.feats  = torch.from_numpy(d["feats"]).float()
-            self.labels = torch.from_numpy(d["labels"]).float()
-            self.masks  = torch.from_numpy(d["masks"]).float()
-        else:
-            self.feats, self.labels, self.masks = \
-                self._extract(clip_model, preprocess, cache_path, device)
+            d = np.load(cache_path, allow_pickle=True)
+            if str(d.get("fingerprint", "")) == fp:
+                self.feats = torch.from_numpy(d["feats"]).float()
+            else:
+                print("  cache fingerprint mismatch (record set changed) — re-extracting")
+        if self.feats is None:
+            self.feats = self._extract(clip_model, preprocess, cache_path, device, fp)
+        self.labels, self.masks = self._labels()
 
-    def _extract(self, model, preprocess, cache_path, device):
+    def _fingerprint(self):
+        import hashlib
+        h = hashlib.sha1()
+        for r in self.records:
+            h.update(f'{r["pair_id"]}|{r["option_id"]}\n'.encode())
+        return h.hexdigest()
+
+    def _labels(self):
+        L = np.array([[float(r["label"]) if r["option_id"] == o else 0.0
+                       for o in self.options] for r in self.records], dtype=np.float32)
+        M = np.array([[1.0 if r["option_id"] == o else 0.0
+                       for o in self.options] for r in self.records], dtype=np.float32)
+        return torch.from_numpy(L), torch.from_numpy(M)
+
+    def _extract(self, model, preprocess, cache_path, device, fingerprint):
         print(f"  Extracting CLIP features for {len(self.records)} records...")
         model.eval()
-        feats, labels, masks = [], [], []
+        feats = []
         with torch.no_grad():
             for rec in tqdm(self.records, leave=False):
                 fn = preprocess(Image.open(IMAGE_ROOT / rec["natural_image"]).convert("RGB")
@@ -112,18 +154,12 @@ class PairDataset(Dataset):
                 en = model.encode_image(fn); en = en / en.norm(dim=-1, keepdim=True)
                 et = model.encode_image(ft); et = et / et.norm(dim=-1, keepdim=True)
                 feats.append(torch.cat([en, et, en - et], dim=-1).squeeze(0).cpu().numpy())
-                lbl = [float(rec["label"]) if rec["option_id"] == o else 0.0
-                       for o in self.options]
-                msk = [1.0 if rec["option_id"] == o else 0.0 for o in self.options]
-                labels.append(lbl); masks.append(msk)
 
         F = np.stack(feats).astype(np.float32)
-        L = np.array(labels, dtype=np.float32)
-        M = np.array(masks,  dtype=np.float32)
         if cache_path:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(cache_path, feats=F, labels=L, masks=M)
-        return torch.from_numpy(F), torch.from_numpy(L), torch.from_numpy(M)
+            np.savez_compressed(cache_path, feats=F, fingerprint=fingerprint)
+        return torch.from_numpy(F)
 
     def __len__(self): return len(self.feats)
     def __getitem__(self, i): return self.feats[i], self.labels[i], self.masks[i]
@@ -185,6 +221,17 @@ def print_metrics(res, label=""):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dim",        required=True, choices=list(DIMENSION_OPTIONS))
+    parser.add_argument("--cache-dir", default=None,
+                        help="feature-cache root (default: alongside --model-dir). "
+                             "Point several seeds at one cache to extract features once.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="RNG seed; vary it to measure run-to-run variance")
+    parser.add_argument("--splits-dir", default=None,
+                        help=f"split directory (default: {DATA_DIR})")
+    parser.add_argument("--model-dir",  default=None,
+                        help=f"checkpoint output directory (default: {MODEL_DIR}). "
+                             "The default is the fleet the app loads; pass this to train "
+                             "an ablation arm without replacing it.")
     parser.add_argument("--epochs",     type=int,   default=60)
     parser.add_argument("--batch-size", type=int,   default=32)
     parser.add_argument("--hidden-dim", type=int,   default=512)
@@ -192,30 +239,47 @@ def main():
     parser.add_argument("--patience",   type=int,   default=35)
     parser.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    set_seed(args.seed)
 
     options   = DIMENSION_OPTIONS[args.dim]
-    cache_dir = MODEL_DIR / args.dim / "cache"
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    data_dir  = Path(args.splits_dir) if args.splits_dir else DATA_DIR
+    # Cache is namespaced by split directory. The .npz holds feats AND labels AND
+    # masks, so a cache built from a different split silently trains on the wrong
+    # labels — the run looks completely normal. Namespacing makes that impossible.
+    model_dir = Path(args.model_dir) if args.model_dir else MODEL_DIR
+    _cache_root = Path(args.cache_dir) if args.cache_dir else model_dir
+    cache_dir = _cache_root / args.dim / "cache" / f"{data_dir.name}_evaltf"
+    model_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
     print(f"\n{'='*60}")
     print(f"  dim={args.dim}  options={options}")
-    print(f"  data:  {DATA_DIR}")
-    print(f"  save:  {MODEL_DIR}/{args.dim.lower()}_evaluator.pt")
+    print(f"  data:  {data_dir}")
+    print(f"  cache: {cache_dir}")
+    print(f"  save:  {model_dir}/{args.dim.lower()}_evaluator.pt")
     print(f"  device={device}")
     print(f"{'='*60}")
 
-    clip_model, preprocess, _ = open_clip.create_model_and_transforms(
+    # open_clip returns (model, preprocess_TRAIN, preprocess_VAL). Take the VAL
+    # transform. preprocess_train is RandomResizedCrop(scale=(0.9,1.0)) — random
+    # — and this code path extracts train, val AND test features with whatever it
+    # is handed, then CACHES them. Using the train transform therefore (a) drew a
+    # different random crop for the natural and the tactile image of a pair,
+    # (b) made val/test features nondeterministic, and (c) froze one arbitrary
+    # crop into the cache. It also disagreed with evaluators/clip_probe_eval.py,
+    # which scores with preprocess_val — so the heads were fit on one transform
+    # and deployed on another.
+    clip_model, _, preprocess = open_clip.create_model_and_transforms(
         CLIP_MODEL, pretrained=CLIP_PRETRAINED, device=device)
     clip_model.eval()
     for p in clip_model.parameters(): p.requires_grad_(False)
 
-    train_ds = PairDataset(DATA_DIR/"train.jsonl", options, clip_model,
+    train_ds = PairDataset(data_dir/"train.jsonl", options, clip_model,
                            preprocess, device, cache_dir/"train.npz")
-    val_ds   = PairDataset(DATA_DIR/"val.jsonl",   options, clip_model,
+    val_ds   = PairDataset(data_dir/"val.jsonl",   options, clip_model,
                            preprocess, device, cache_dir/"val.npz")
-    test_ds  = PairDataset(DATA_DIR/"test.jsonl",  options, clip_model,
+    test_ds  = PairDataset(data_dir/"test.jsonl",  options, clip_model,
                            preprocess, device, cache_dir/"test.npz")
 
     print(f"  records: train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
@@ -313,10 +377,12 @@ def main():
               f"pos={int(yt.sum())}/{int(obs.sum())}")
 
     # ── Save checkpoint ───────────────────────────────────────────────────────
-    ckpt_path = MODEL_DIR / f"{args.dim.lower()}_evaluator.pt"
+    ckpt_path = model_dir / f"{args.dim.lower()}_evaluator.pt"
     torch.save({
         "dim":            args.dim,
         "options":        options,
+        "splits_dir":     str(data_dir),
+        "seed":        args.seed,
         "state_dict":     best_state,
         "hidden_dim":     args.hidden_dim,
         "best_epoch":     best_epoch,

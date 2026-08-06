@@ -46,7 +46,10 @@ cd "$TACTILE_DATA_ROOT"
 mkdir -p logs
 
 echo "Building VQA v2 dataset from merged splits..."
-python "$REPO/research/vlm/build_vqa_v2.py"
+# Pinned to splits_v2/vqa_v2: this is a HISTORICAL run kept reproducible.
+# build_vqa_v2.py now defaults to the v1 unified splits.
+python "$REPO/research/vlm/build_vqa_v2.py" \
+    --splits-dir data/splits_v2 --out-dir data/vqa_v2
 
 echo "Fine-tuning Qwen2-VL-2B (v5: 154-pair merge, seed 43, patience 5)..."
 python "$REPO/research/vlm/step9_finetune_vlm.py" \

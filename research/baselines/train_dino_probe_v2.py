@@ -13,12 +13,12 @@ Architecture:
   → 4 independent MLP heads (QL / QP / QT / QE)
   → Asymmetric Loss (same as CLIP probe)
 
-Saves to: TactileEval_Context_And_Data/models/dino_probe_v2/
+Saves to <--model-dir>/, one checkpoint per dim.
 
 Usage:
-  python code/baselines/train_dino_probe_v2.py --dim QL
-  python code/baselines/train_dino_probe_v2.py --dim QP
-  ...all five run sequentially via train_dino_probe_v2.sh
+  python research/baselines/train_dino_probe_v2.py --dim QL --seed 42
+  python research/baselines/train_dino_probe_v2.py --dim QP --seed 42
+  ...all four run sequentially via train_dino_probe_v2.sh
 """
 
 import sys
@@ -29,6 +29,8 @@ from _paths import DATA_ROOT, REPO_ROOT  # noqa: E402
 import argparse
 import json
 from pathlib import Path
+
+import random
 
 import numpy as np
 import torch
@@ -44,7 +46,7 @@ except ImportError:
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT       = DATA_ROOT
-DATA_DIR   = ROOT / "data" / "splits_v2"
+DATA_DIR   = ROOT / "data" / "splits_v3_unified"
 MODEL_DIR  = ROOT / "TactileEval_Context_And_Data" / "models" / "dino_probe_v2"
 IMAGE_ROOT = ROOT / "images"
 
@@ -72,6 +74,22 @@ DINO_TRANSFORM = T.Compose([
     T.Normalize(mean=[0.485, 0.456, 0.406],
                 std= [0.229, 0.224, 0.225]),
 ])
+
+
+def set_seed(seed: int):
+    """Seed every RNG the run touches.
+
+    These trainers previously seeded nothing, so two runs on identical data
+    differed by whatever the shuffle order and weight init happened to be. That
+    made small deltas between checkpoints unreadable: a macro-F1 move of a few
+    points could be a real effect or could be the seed. Fixing the seed makes a
+    single run reproducible; VARYING it deliberately across runs is what gives
+    the noise floor a comparison has to clear.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 # ── Asymmetric Loss (same as CLIP probe) ───────────────────────────────────────
@@ -142,35 +160,46 @@ class DinoDataset(Dataset):
         self.options  = options
         self.feat_map = feat_map
 
-        # Pre-build tensors (feats, labels, masks)
+        # Cache FEATURES only. Labels change on every verification pass while
+        # the cache key (the split directory) does not, so caching them together
+        # silently trains a relabelled split on stale labels. The fingerprint
+        # pins record identity and order so cached rows still line up.
+        fp = self._fingerprint()
+        self.feats = None
         if cache_path.exists():
-            d = np.load(cache_path)
-            self.feats  = torch.from_numpy(d["feats"]).float()
-            self.labels = torch.from_numpy(d["labels"]).float()
-            self.masks  = torch.from_numpy(d["masks"]).float()
-        else:
-            self._build(cache_path)
+            d = np.load(cache_path, allow_pickle=True)
+            if str(d.get("fingerprint", "")) == fp:
+                self.feats = torch.from_numpy(d["feats"]).float()
+            else:
+                print("  cache fingerprint mismatch (record set changed) — rebuilding")
+        if self.feats is None:
+            self._build(cache_path, fp)
+        self.labels, self.masks = self._labels()
 
-    def _build(self, cache_path: Path):
-        feats, labels, masks = [], [], []
+    def _fingerprint(self):
+        import hashlib
+        h = hashlib.sha1()
+        for r in self.records:
+            h.update(f'{r["pair_id"]}|{r["option_id"]}\n'.encode())
+        return h.hexdigest()
+
+    def _labels(self):
+        L = np.array([[float(r["label"]) if r["option_id"] == o else 0.0
+                       for o in self.options] for r in self.records], dtype=np.float32)
+        M = np.array([[1.0 if r["option_id"] == o else 0.0
+                       for o in self.options] for r in self.records], dtype=np.float32)
+        return torch.from_numpy(L), torch.from_numpy(M)
+
+    def _build(self, cache_path: Path, fingerprint: str):
+        feats = []
         for r in self.records:
             fn = self.feat_map[r["natural_image"]]
             ft = self.feat_map[r["tactile_image"]]
-            feat = np.concatenate([fn, ft, fn - ft])  # (3072,)
-            lbl  = [float(r["label"]) if r["option_id"] == o else 0.0
-                    for o in self.options]
-            msk  = [1.0 if r["option_id"] == o else 0.0
-                    for o in self.options]
-            feats.append(feat); labels.append(lbl); masks.append(msk)
-
-        F = np.array(feats,  dtype=np.float32)
-        L = np.array(labels, dtype=np.float32)
-        M = np.array(masks,  dtype=np.float32)
+            feats.append(np.concatenate([fn, ft, fn - ft]))  # (3072,)
+        F = np.array(feats, dtype=np.float32)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache_path, feats=F, labels=L, masks=M)
-        self.feats  = torch.from_numpy(F)
-        self.labels = torch.from_numpy(L)
-        self.masks  = torch.from_numpy(M)
+        np.savez_compressed(cache_path, feats=F, fingerprint=fingerprint)
+        self.feats = torch.from_numpy(F)
 
     def __len__(self): return len(self.feats)
     def __getitem__(self, i): return self.feats[i], self.labels[i], self.masks[i]
@@ -237,6 +266,13 @@ def print_metrics(res, label=""):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dim",        required=True, choices=list(DIMENSION_OPTIONS))
+    parser.add_argument("--cache-dir", default=None,
+                        help="feature-cache root (default: alongside --model-dir). "
+                             "Point several seeds at one cache to extract features once.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="RNG seed; vary it to measure run-to-run variance")
+    parser.add_argument("--splits-dir", default=None,
+                        help=f"split directory (default: {DATA_DIR})")
     parser.add_argument("--epochs",     type=int,   default=60)
     parser.add_argument("--batch-size", type=int,   default=32)
     parser.add_argument("--hidden-dim", type=int,   default=512)
@@ -253,22 +289,32 @@ def main():
                         help="Override output directory for checkpoints.")
     parser.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
+    set_seed(args.seed)
 
     options    = DIMENSION_OPTIONS[args.dim]
+    data_dir   = Path(args.splits_dir) if args.splits_dir else DATA_DIR
     out_dir    = Path(args.model_dir) if args.model_dir else MODEL_DIR
-    cache_dir  = out_dir / args.dim / "cache"
+    # Both caches are namespaced by split directory. The per-dim .npz holds
+    # feats AND labels AND masks, and the backbone cache is a path->feature map
+    # that is NOT re-extracted when it already exists — so a split with new pairs
+    # would find them missing. Either way a stale cache corrupts the run in
+    # silence. Namespacing makes reuse across splits impossible.
+    _cache_root = Path(args.cache_dir) if args.cache_dir else out_dir
+    cache_dir  = _cache_root / args.dim / "cache" / data_dir.name
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
     device     = torch.device(args.device)
 
-    # Backbone feature cache is always in MODEL_DIR (shared regardless of variant)
-    shared_backbone_cache = MODEL_DIR / "cache"
+    # Backbone feature cache is shared across plain and adapted variants, but
+    # still per-split.
+    shared_backbone_cache = (Path(args.cache_dir) if args.cache_dir else MODEL_DIR) / "cache" / data_dir.name
     shared_backbone_cache.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
     print(f"  DINOv2 probe  dim={args.dim}  options={options}")
-    print(f"  data: {DATA_DIR}")
-    print(f"  save: {MODEL_DIR}/{args.dim.lower()}_evaluator.pt")
+    print(f"  data: {data_dir}")
+    print(f"  cache: {cache_dir}")
+    print(f"  save: {out_dir}/{args.dim.lower()}_evaluator.pt")
     print(f"  device={device}")
     print(f"{'='*60}")
 
@@ -302,11 +348,11 @@ def main():
               f"  (1024→{ckpt['probe_dim']}-d probe features)")
 
     # Extract / load backbone features (shared across plain and adapted variants)
-    train_feats = _extract_all_features(dino, DATA_DIR/"train.jsonl", device,
+    train_feats = _extract_all_features(dino, data_dir/"train.jsonl", device,
                                          shared_backbone_cache/"train_feats.npz")
-    val_feats   = _extract_all_features(dino, DATA_DIR/"val.jsonl",   device,
+    val_feats   = _extract_all_features(dino, data_dir/"val.jsonl",   device,
                                          shared_backbone_cache/"val_feats.npz")
-    test_feats  = _extract_all_features(dino, DATA_DIR/"test.jsonl",  device,
+    test_feats  = _extract_all_features(dino, data_dir/"test.jsonl",  device,
                                          shared_backbone_cache/"test_feats.npz")
 
     # If using projection head, transform all cached features now
@@ -328,11 +374,11 @@ def main():
         print(f"  Done — projected feature dim: {list(train_feats.values())[0].shape}")
 
     # Build datasets (pair feats + labels + masks, cached per dim)
-    train_ds = DinoDataset(DATA_DIR/"train.jsonl", options, train_feats,
+    train_ds = DinoDataset(data_dir/"train.jsonl", options, train_feats,
                            cache_dir/"train.npz")
-    val_ds   = DinoDataset(DATA_DIR/"val.jsonl",   options, val_feats,
+    val_ds   = DinoDataset(data_dir/"val.jsonl",   options, val_feats,
                            cache_dir/"val.npz")
-    test_ds  = DinoDataset(DATA_DIR/"test.jsonl",  options, test_feats,
+    test_ds  = DinoDataset(data_dir/"test.jsonl",  options, test_feats,
                            cache_dir/"test.npz")
 
     print(f"  records: train={len(train_ds)}  val={len(val_ds)}  test={len(test_ds)}")
@@ -408,6 +454,8 @@ def main():
     torch.save({
         "dim":            args.dim,
         "options":        options,
+        "splits_dir":     str(data_dir),
+        "seed":        args.seed,
         "state_dict":     best_state,
         "hidden_dim":     args.hidden_dim,
         "input_dim":      INPUT_DIM,

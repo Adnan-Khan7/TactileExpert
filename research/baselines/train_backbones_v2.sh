@@ -28,7 +28,21 @@ export TACTILE_DATA_ROOT="${TACTILE_DATA_ROOT:-$HOME/vlm_finetune}"
 cd "$TACTILE_DATA_ROOT"
 mkdir -p logs
 
-python "$REPO/research/baselines/train_backbones_v2.py" --backbone resnet50
-python "$REPO/research/baselines/train_backbones_v2.py" --backbone vit_b_16
+# Without this a crashed trainer still exits 0 (the trailing echo succeeds)
+# and sacct reports COMPLETED — a silent failure that looks like a result.
+set -e
+
+# extra args are forwarded to every trainer invocation (e.g. --seed 7)
+EXTRA_ARGS=("$@")
+
+# MODELS_OUT selects where the checkpoints land. Default is the v1 fleet:
+#   sbatch --export=ALL,MODELS_OUT=<dir> train_backbones_v2.sh --seed N
+# Vary --seed across runs to measure the noise floor a result must clear.
+MODELS_V1="${MODELS_OUT:-$TACTILE_DATA_ROOT/TactileEval_Context_And_Data/models_v1}"
+
+python "$REPO/research/baselines/train_backbones_v2.py" --backbone resnet50 \
+    --splits-dir "$TACTILE_DATA_ROOT/data/splits_v3_unified" --model-dir "$MODELS_V1" "${EXTRA_ARGS[@]}"
+python "$REPO/research/baselines/train_backbones_v2.py" --backbone vit_b_16 \
+    --splits-dir "$TACTILE_DATA_ROOT/data/splits_v3_unified" --model-dir "$MODELS_V1" "${EXTRA_ARGS[@]}"
 
 echo "Finished: $(date)"

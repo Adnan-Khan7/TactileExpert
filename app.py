@@ -728,7 +728,8 @@ def main():
             mode_lbl, selected_models, trusted_model, combine_all)
         return last["pil"], tbl, clear, strip, log, gallery, prefill, top_opt, ""
 
-    def on_save_to_train(label_selections: list, mode_lbl: str, selected_models: list):
+    def on_save_to_train(label_selections: list, synthetic: bool,
+                         mode_lbl: str, selected_models: list):
         if not _state:
             return "⚠ Nothing to save yet."
         last = _state[-1]
@@ -754,6 +755,14 @@ def main():
             "source":        "gpt-image-1",
             "iteration":     last["label"],
             "saved_at":      datetime.now().isoformat(timespec="seconds"),
+            # Provenance for the controlled-corruption protocol: this pair's
+            # defects were INTRODUCED on purpose to enrich a starved class, not
+            # observed. Written at collection time because retrofitting it later
+            # is not possible — nothing else in the record distinguishes a
+            # deliberate corruption from a naturally occurring defect.
+            # MUST be honoured at merge: synthetic pairs go to train/val ONLY,
+            # never the holdout, or the holdout stops measuring natural defects.
+            "synthetic_corruption": bool(synthetic),
         }
         for opt in ALL_OPTIONS:
             record[opt] = 1 if opt in label_selections else 0
@@ -814,6 +823,10 @@ def main():
             "steps":           steps,
             "evaluator_flags": evaluator_flags,
             "human_labels":    human_labels,
+            # Mirrored from the annotation record — trajectory consumers
+            # (extract_policy_data.py) must be able to exclude deliberate
+            # corruptions without joining back to annotations.jsonl.
+            "synthetic_corruption": bool(synthetic),
         }
         with open(TRAJ_FILE, "a") as f:
             f.write(json.dumps(traj) + "\n")
@@ -1034,6 +1047,23 @@ def main():
                             value=[],
                             label="Defects present (uncheck = this pair is clean for this option)",
                         )
+                        synth_cb = gr.Checkbox(
+                            label="Deliberate corruption (synthetic positive)",
+                            value=False,
+                            info="Tick ONLY when you prompted the generator to "
+                                 "introduce a defect on purpose. Recorded as "
+                                 "synthetic_corruption so these pairs can be kept "
+                                 "out of the holdout at merge.",
+                        )
+                        gr.Markdown(
+                            "<small><b>When collecting synthetic positives:</b> the "
+                            "instruction is <i>not</i> the label. gpt-image-1 is not "
+                            "surgical — it will change things you did not ask about. "
+                            "Verify <b>all five</b> checkboxes against what you "
+                            "actually see, or you inject false negatives on the four "
+                            "you did not look at. One save per session, then "
+                            "<b>Reset</b>.</small>"
+                        )
                         save_btn  = gr.Button("Save to training data", variant="primary")
                         save_status = gr.Markdown()
 
@@ -1161,7 +1191,7 @@ def main():
 
         save_btn.click(
             fn=on_save_to_train,
-            inputs=[save_labels, mode_radio, model_select],
+            inputs=[save_labels, synth_cb, mode_radio, model_select],
             outputs=save_status,
         )
 

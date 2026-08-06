@@ -1,19 +1,30 @@
-"""Re-derive ENSEMBLE_WEIGHTS + Platt calibrators for the NEWLY DEPLOYED fleet.
+"""Fit the ensemble weights and per-model probability calibrators.
 
-Why a fresh GPU pass: the live weights and calibrators were fit on scores the
-OLD fleet logged into trajectories.jsonl. After deploying v5 vision + 7B VLM,
-those are stale — so this re-scores the collected data with the *deployed*
-evaluators and re-derives from scratch.
+Scores the trajectory finals (label = human checkbox) and the inferred pre-edit
+positives (edit-step target_option, label=1) with the fleet in
+~/TactileExpert/models/, then derives:
 
-Scores (with the deployed fleet in ~/TactileExpert/models/):
-  * trajectory FINALS  (label = human checkbox)  + INFERRED pre-edit positives
-    (edit-step target_option, label=1) — the live-disagreement set used for
-    per-option ENSEMBLE_WEIGHTS (per-model accuracy) and for calibration.
+  * ENSEMBLE_WEIGHTS          -> paste into evaluators/constants.py
+  * experiments_out/fleet_calibration.json  (per-model temperature or Platt,
+    whichever wins on out-of-fold NLL)
 
-Outputs (paste weights into constants.py; calibration JSON is used offline):
-  * ENSEMBLE_WEIGHTS dict (printed)
-  * experiments_out/fleet_calibration.json  (per-model Platt/temperature)
-Run as a GPU job (7B). Then paste weights, and re-run extract_policy_data.py.
+Needs a GPU: the VLM is 7B.
+
+TRAIN-SPLIT SESSIONS ONLY
+-------------------------
+Weights and calibrators are FITTED PARAMETERS, so they must not see the data the
+fleet is later measured on. A calibrator in particular directly moves a score
+across its threshold, so fitting one on a test pair and then thresholding that
+same pair with it is circular.
+
+Sessions are matched to a split by the `gpt_generated/pair_<session>/` prefix of
+their pair_id. Library pairs never appear in trajectories.jsonl and so are never
+at risk; the exposure is limited to the generated sessions that landed in
+val/test. --allow-all-sessions lifts the restriction and says so loudly.
+
+Note the cost: filtering drops the fitting pool from 154 sessions to the ~99 in
+train. If the calibrators come out unstable, fitting on train+val and protecting
+only test recovers most of that while keeping the reported figures clean.
 """
 
 import sys
@@ -21,8 +32,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _paths import DATA_ROOT, REPO_ROOT  # noqa: E402
 
+import argparse
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -33,15 +46,32 @@ HOME = Path.home()
 TRAJ = REPO_ROOT / "generated_training_data/trajectories.jsonl"
 TRAIN_DIR = REPO_ROOT / "generated_training_data"
 CAL_OUT = DATA_ROOT / "experiments_out/fleet_calibration.json"
+SPLITS = DATA_ROOT / "data" / "splits_v3_unified"
+SESSION_RE = re.compile(r"gpt_generated/pair_([0-9_]+)/")
 
 OPTS = ["too_thick", "broken_lines", "missing_parts", "missing_texture", "extra_parts"]
 MODELS = ["CLIP Probe", "VLM Fine-tuned", "ResNet-50", "ViT-B/16", "DINOv2 Probe"]
-FLEET = "CLIP/DINOv2/ResNet/ViT v5; VLM 7B (deployed 2026-07-27)"
+FLEET = "v1 fleet: CLIP/DINOv2/ResNet/ViT + Qwen2-VL-7B, trained on splits_v3_unified"
 EPS = 1e-6
 
 
 def logit(p): return math.log(min(max(p, EPS), 1 - EPS) / (1 - min(max(p, EPS), 1 - EPS)))
 def sigmoid(z): return 1.0 / (1.0 + math.exp(-z))
+
+
+def sessions_in_split(splits_dir, name):
+    """Generated-session ids appearing in one split, from their pair_ids."""
+    p = splits_dir / f"{name}.jsonl"
+    if not p.exists():
+        return set()
+    out = set()
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            continue
+        m = SESSION_RE.search(json.loads(line)["pair_id"])
+        if m:
+            out.add(m.group(1))
+    return out
 
 
 def build_scorers():
@@ -60,8 +90,13 @@ def build_scorers():
     return ev
 
 
-def collect_records(ev):
-    """Score finals + inferred pre-edit positives -> per model (prob, label, opt)."""
+def collect_records(ev, allowed=None):
+    """Score finals + inferred pre-edit positives -> per model (prob, label, opt).
+
+    `allowed` is the set of session ids that may contribute. None means no
+    filtering, which leaks evaluation sessions into the fit — see the module
+    docstring.
+    """
     trajs = [json.loads(l) for l in TRAJ.read_text().splitlines()]
     recs = {m: {"p": [], "y": [], "opt": []} for m in MODELS}
     cache = {}   # (nat, tac) -> {model: {opt: prob}}
@@ -73,8 +108,12 @@ def collect_records(ev):
         return cache[key]
 
     n_final = n_inf = 0
+    n_skipped = 0
     for t in trajs:
         ts = t["trajectory_id"].replace("traj_", "")
+        if allowed is not None and ts not in allowed:
+            n_skipped += 1
+            continue
         pdir = TRAIN_DIR / f"pair_{ts}"
         nat = str(pdir / "natural.jpg")
         steps = t["steps"]
@@ -101,6 +140,8 @@ def collect_records(ev):
         print(f"scored {ts} ({n_final} finals, {n_inf} inferred)", flush=True)
     for m in MODELS:
         recs[m]["p"] = np.array(recs[m]["p"], float); recs[m]["y"] = np.array(recs[m]["y"], float)
+    if n_skipped:
+        print(f"\nskipped {n_skipped} session(s) not in the train split")
     return recs, n_final, n_inf
 
 
@@ -134,18 +175,59 @@ def cv_nll(p, y, fit, k=5, seed=42):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--splits-dir", default=None)
+    ap.add_argument("--allow-all-sessions", action="store_true",
+                    help="fit on every session, including val/test — LEAKS")
+    args = ap.parse_args()
+
+    splits_dir = Path(args.splits_dir) if args.splits_dir else SPLITS
+    if args.allow_all_sessions:
+        allowed = None
+        print("!! --allow-all-sessions: fitting on val/test sessions too.")
+        print("!! Weights and calibrators produced here are LEAKED. Do not deploy.\n")
+    else:
+        allowed = sessions_in_split(splits_dir, "train")
+        held = sessions_in_split(splits_dir, "val") | sessions_in_split(splits_dir, "test")
+        overlap = allowed & held
+        print(f"C2: fitting on {len(allowed)} train session(s); "
+              f"{len(held)} val/test session(s) excluded  [{splits_dir}]")
+        if overlap:
+            raise SystemExit(f"session(s) in both train and val/test: {sorted(overlap)[:5]}")
+        if not allowed:
+            raise SystemExit(f"no generated sessions found in {splits_dir}/train.jsonl")
+
     ev = build_scorers()
-    recs, n_final, n_inf = collect_records(ev)
+    recs, n_final, n_inf = collect_records(ev, allowed)
     print(f"\ncalibration/weight set: {n_final} finals + {n_inf} inferred positives\n")
 
-    # ENSEMBLE_WEIGHTS = per-option per-model accuracy on the live set
+    # ENSEMBLE_WEIGHTS = per-option per-model accuracy on the live set.
+    #
+    # CAUTION: accuracy is degenerate under this class imbalance. On too_thick
+    # (~14% positive) a judge that never flags scores ~86% and therefore earns
+    # the HIGHEST weight — the combiner rewards silence on exactly the options
+    # the fleet is worst at. AUC-based weights are computed alongside for
+    # comparison; they are threshold-free and cannot be gamed by abstaining.
+    # The accuracy weights remain the default only because they are what the
+    # deployed combiner was built on. Compare before adopting either.
+    def _auc(p, y):
+        pos, neg = p[y > 0.5], p[y <= 0.5]
+        if len(pos) == 0 or len(neg) == 0:
+            return 0.5
+        return float((pos[:, None] > neg[None, :]).mean()
+                     + 0.5 * (pos[:, None] == neg[None, :]).mean())
+
     weights = {o: {} for o in OPTS}
+    weights_auc = {o: {} for o in OPTS}
+    flag_rate = {o: {} for o in OPTS}
     for m in MODELS:
         for o in OPTS:
             mask = np.array(recs[m]["opt"]) == o
             p, y = recs[m]["p"][mask], recs[m]["y"][mask]
             acc = np.mean((p > 0.5) == (y > 0.5)) if len(p) else 0.5
             weights[o][m] = round(float(acc), 3)
+            weights_auc[o][m] = round(_auc(p, y), 3) if len(p) else 0.5
+            flag_rate[o][m] = round(float(np.mean(p > 0.5)), 3) if len(p) else 0.0
 
     calibrators = {}
     for m in MODELS:
@@ -156,13 +238,29 @@ def main():
     CAL_OUT.write_text(json.dumps({
         "method": "per-model temperature/Platt by out-of-fold NLL",
         "fleet": FLEET,
+        "splits_dir": str(splits_dir),
+        "fit_sessions": "train-split only" if allowed is not None else "ALL (LEAKED)",
+        "n_fit_sessions": len(allowed) if allowed is not None else None,
         "calibration_set": {"finals": n_final, "inferred_positives": n_inf},
+        "ensemble_weights_accuracy": weights,
+        "ensemble_weights_auc": weights_auc,
+        "flag_rate_at_0.50": flag_rate,
         "calibrators": calibrators}, indent=2))
 
     print("ENSEMBLE_WEIGHTS = {")
     for o in OPTS:
         print(f'    "{o}": {{' + ", ".join(f'"{m}": {weights[o][m]}' for m in MODELS) + "},")
     print("}\n")
+    print("\n# AUC-based weights (threshold-free alternative — NOT deployed)")
+    print("ENSEMBLE_WEIGHTS_AUC = {")
+    for o in OPTS:
+        print(f'    "{o}": {{' + ", ".join(f'"{m}": {weights_auc[o][m]}' for m in MODELS) + "},")
+    print("}\n")
+    print("flag rate at t=0.50 (a near-zero rate with a high accuracy weight means")
+    print("that judge is being rewarded for abstaining, not for detecting):")
+    for o in OPTS:
+        print(f"  {o:<18} " + "  ".join(f"{m.split()[0]}={flag_rate[o][m]:.2f}" for m in MODELS))
+    print()
     print(f"calibrators saved -> {CAL_OUT}")
     for m, c in calibrators.items():
         print(f"  {m:<15} {c}")

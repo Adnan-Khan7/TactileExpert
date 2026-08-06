@@ -45,7 +45,10 @@ mkdir -p logs
 
 # Step 1 — rebuild VQA dataset from the merged splits (fast, CPU only)
 echo "Building VQA v2 dataset..."
-python "$REPO/research/vlm/build_vqa_v2.py"
+# Pinned to splits_v2/vqa_v2: this is a HISTORICAL run kept reproducible.
+# build_vqa_v2.py now defaults to the v1 unified splits.
+python "$REPO/research/vlm/build_vqa_v2.py" \
+    --splits-dir data/splits_v2 --out-dir data/vqa_v2
 
 # Step 2 — fine-tune with new seed + longer early-stopping patience
 echo "Fine-tuning Qwen2-VL-2B (v4 retry: seed 43, patience 5)..."

@@ -30,9 +30,18 @@ _GR_MAJOR = int(gr.__version__.split('.')[0])
 ANNOTATIONS_FILE = DATA_ROOT / "annotations.jsonl"
 IMAGES_BASE      = DATA_ROOT / "images"
 
+# non_conformant retired from the UI 2026-08-03: it is not in the deployed
+# ALL_OPTIONS, no evaluator scores it, and it is not collected any more.
+# Existing non_conformant labels in splits_v2 are left untouched — this only
+# stops NEW ones being gathered. Removing it here is sufficient: cb_values(),
+# commit() and the handler output lists are all derived from OPTION_KEYS/all_cbs.
+# noisy_background retired 2026-08-03 alongside non_conformant: neither is in the
+# deployed ALL_OPTIONS, and noisy_background was excluded from the VQA build for
+# having only 22 positives. The UI now shows exactly the five options the fleet
+# actually scores.
 OPTION_KEYS = [
     'too_thick', 'broken_lines', 'missing_parts', 'missing_texture',
-    'extra_parts', 'noisy_background', 'non_conformant',
+    'extra_parts',
 ]
 
 OPTION_LABELS = {
@@ -204,12 +213,6 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
                                       info=OPTION_INFO['missing_texture'])
         cb_extra       = gr.Checkbox(label=OPTION_LABELS['extra_parts'],
                                       info=OPTION_INFO['extra_parts'])
-        cb_bg          = gr.Checkbox(label=OPTION_LABELS['noisy_background'],
-                                      info=OPTION_INFO['noisy_background'])
-
-    with gr.Column(elem_classes=["conform-section"]):
-        cb_nonconf = gr.Checkbox(label=OPTION_LABELS['non_conformant'],
-                                  info=OPTION_INFO['non_conformant'])
 
     # ── Save controls ────────────────────────────────────────────────────────
     with gr.Row():
@@ -218,13 +221,12 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
     status_md = gr.Markdown()
 
     # Ordered list of all checkbox components — must match OPTION_KEYS order
-    all_cbs = [cb_too_thick, cb_broken, cb_miss_parts, cb_miss_tex,
-               cb_extra, cb_bg, cb_nonconf]
+    all_cbs = [cb_too_thick, cb_broken, cb_miss_parts, cb_miss_tex, cb_extra]
 
     # ── Output lists (must be consistent across all handlers) ────────────────
-    #   load_pair() returns: [header, nat, tac, cb×7, status]  = 11 items
+    #   load_pair() returns: [header, nat, tac, cb×5, status]  = 9 items
     pair_outputs  = [header_md, nat_img, tac_img] + all_cbs + [status_md]
-    nav_outputs   = [cur_idx] + pair_outputs          # 12 items
+    nav_outputs   = [cur_idx] + pair_outputs          # 10 items
 
     # ── Event handlers ───────────────────────────────────────────────────────
 

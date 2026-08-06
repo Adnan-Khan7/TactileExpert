@@ -22,6 +22,7 @@ Outputs experiments_out/eval_current_fleet.json and prints README-ready tables.
 Usage:  python research/experiments/score_deployed_fleet.py
 """
 
+import argparse
 import gc
 import json
 import sys
@@ -32,7 +33,7 @@ from _paths import DATA_ROOT, REPO_ROOT  # noqa: E402
 
 sys.path.insert(0, str(REPO_ROOT))
 
-SPLITS = DATA_ROOT / "data" / "splits_v2"
+SPLITS = DATA_ROOT / "data" / "splits_v3_unified"
 IMG_ROOT = DATA_ROOT / "images"
 VLM_JSON = DATA_ROOT / "experiments_out" / "eval_7b_gate.json"
 OUT = DATA_ROOT / "experiments_out" / "eval_current_fleet.json"
@@ -43,9 +44,20 @@ VLM = "VLM Fine-tuned"
 MODELS = ["CLIP Probe", VLM, "ResNet-50", "ViT-B/16", "DINOv2 Probe"]
 
 
-def load_split(name):
+def prf(preds, labels):
+    tp = sum(p and l for p, l in zip(preds, labels))
+    fp = sum(p and not l for p, l in zip(preds, labels))
+    fn = sum((not p) and l for p, l in zip(preds, labels))
+    prec = tp / (tp + fp) if tp + fp else float("nan")
+    rec = tp / (tp + fn) if tp + fn else float("nan")
+    return prec, rec
+
+
+def load_split(name, splits_dir=None):
     pairs = {}
-    for line in (SPLITS / f"{name}.jsonl").read_text().splitlines():
+    for line in ((splits_dir or SPLITS) / f"{name}.jsonl").read_text().splitlines():
+        if not line.strip():
+            continue
         r = json.loads(line)
         if r["option_id"] not in OPTS:
             continue
@@ -84,14 +96,28 @@ def auc(scores, labels):
     return (rsum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
 
 
-def score_vision(pairs_by_split):
+def score_vision(pairs_by_split, models_dir=None):
+    """Score the four vision judges.
+
+    models_dir points at a fleet directory laid out like TactileExpert/models/
+    (clip_probe/, dino_probe/, resnet50/, vit_b16/). Passing it lets a freshly
+    trained fleet be evaluated from its staging directory, so nothing has to be
+    installed over the live one before the numbers are in.
+    """
     from evaluators import (CLIPProbeEvaluator, DINOProbeEvaluator,
                             ResNetEvaluator, ViTEvaluator)
+    md = Path(models_dir) if models_dir else None
     makers = {
-        "CLIP Probe":   lambda: CLIPProbeEvaluator(device="cpu"),
-        "DINOv2 Probe": lambda: DINOProbeEvaluator(device="cpu"),
-        "ResNet-50":    lambda: ResNetEvaluator(device="cpu"),
-        "ViT-B/16":     lambda: ViTEvaluator(device="cpu"),
+        "CLIP Probe":   lambda: CLIPProbeEvaluator(
+            models_dir=md / "clip_probe" if md else None, device="cpu"),
+        "DINOv2 Probe": lambda: DINOProbeEvaluator(
+            models_dir=md / "dino_probe" if md else None, device="cpu"),
+        "ResNet-50":    lambda: ResNetEvaluator(
+            checkpoint=md / "resnet50" / "resnet50_evaluator.pt" if md else None,
+            device="cpu"),
+        "ViT-B/16":     lambda: ViTEvaluator(
+            checkpoint=md / "vit_b16" / "vit_b_16_evaluator.pt" if md else None,
+            device="cpu"),
     }
     out = {sp: {} for sp in pairs_by_split}
     for name in VISION:
@@ -110,13 +136,34 @@ def score_vision(pairs_by_split):
 
 
 def main():
-    pairs = {"test": load_split("test"), "gpt_test": load_split("gpt_test")}
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--splits-dir", default=None)
+    ap.add_argument("--splits", nargs="+", default=["test"],
+                    help="splits to score (v1 has no gpt_test — that regime is retired)")
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--fleet", default="v1 fleet")
+    ap.add_argument("--models-dir", default=None,
+                    help="fleet directory to score (default: the deployed "
+                         "TactileExpert/models/). Point at a staging dir to "
+                         "evaluate a new fleet before installing it.")
+    ap.add_argument("--vlm-json", default=None,
+                    help="JSON holding per-pair VLM scores (default: %s)" % VLM_JSON.name)
+    args = ap.parse_args()
+
+    splits_dir = Path(args.splits_dir) if args.splits_dir else SPLITS
+    out_path = Path(args.out) if args.out else OUT
+
+    pairs = {sp: load_split(sp, splits_dir) for sp in args.splits}
+    print(f"labels: {splits_dir}")
     for sp, p in pairs.items():
         print(f"{sp}: {len(p)} pairs x {len(OPTS)} options = {len(p)*len(OPTS)} decisions")
 
-    scores = score_vision(pairs)
+    if args.models_dir:
+        print(f"fleet:  {args.models_dir}")
+    scores = score_vision(pairs, args.models_dir)
 
-    vlm_src = json.loads(VLM_JSON.read_text())["results"]
+    vlm_json = Path(args.vlm_json) if args.vlm_json else VLM_JSON
+    vlm_src = json.loads(vlm_json.read_text())["results"]
     for sp in pairs:
         scores[sp][VLM] = vlm_src[sp][VLM]
         missing = set(pairs[sp]) - set(scores[sp][VLM])
@@ -130,63 +177,83 @@ def main():
         ens = build_ensemble_result(mr, "balanced")
         return {o: ens["options"][o] for o in OPTS}
 
-    # ── original test: per-option F1 + AUC ────────────────────────────────────
-    metrics = {}
-    order = sorted(pairs["test"])
-    for m in MODELS:
-        metrics[m] = {}
-        for o in OPTS:
-            s = [scores["test"][m][pid][o] for pid in order]
-            y = [pairs["test"][pid]["labels"][o] for pid in order]
-            metrics[m][o] = {"f1": f1([x > 0.5 for x in s], y), "auc": auc(s, y)}
-        metrics[m]["macro_f1"] = sum(metrics[m][o]["f1"] for o in OPTS) / len(OPTS)
-        metrics[m]["macro_auc"] = sum(metrics[m][o]["auc"] for o in OPTS) / len(OPTS)
+    # ── per-option precision / recall / F1 / AUC, per split ──────────────────
+    # Never a single accuracy figure: under this class imbalance the always-clean
+    # constant scores ~66%, so aggregate accuracy cannot distinguish a useful
+    # judge from a degenerate one. That is why the v1 dataset exists.
+    metrics_by_split = {}
+    for sp in pairs:
+        metrics = {}
+        order = sorted(pairs[sp])
+        for m in MODELS:
+            metrics[m] = {}
+            for o in OPTS:
+                s = [scores[sp][m][pid][o] for pid in order]
+                y = [pairs[sp][pid]["labels"][o] for pid in order]
+                pred = [x > 0.5 for x in s]
+                p_, r_ = prf(pred, y)
+                metrics[m][o] = {"precision": p_, "recall": r_,
+                                 "f1": f1(pred, y), "auc": auc(s, y)}
+            metrics[m]["macro_f1"] = sum(metrics[m][o]["f1"] for o in OPTS) / len(OPTS)
+            metrics[m]["macro_auc"] = sum(metrics[m][o]["auc"] for o in OPTS) / len(OPTS)
 
-    ens_test = {pid: ensemble_probs("test", pid) for pid in order}
-    metrics[ENSEMBLE_NAME] = {}
-    for o in OPTS:
-        y = [pairs["test"][pid]["labels"][o] for pid in order]
-        metrics[ENSEMBLE_NAME][o] = {
-            "f1": f1([ens_test[pid][o]["flagged"] for pid in order], y),
-            "auc": auc([ens_test[pid][o]["prob_yes"] for pid in order], y),
-        }
+        ens = {pid: ensemble_probs(sp, pid) for pid in order}
+        metrics[ENSEMBLE_NAME] = {}
+        for o in OPTS:
+            y = [pairs[sp][pid]["labels"][o] for pid in order]
+            pred = [ens[pid][o]["flagged"] for pid in order]
+            p_, r_ = prf(pred, y)
+            metrics[ENSEMBLE_NAME][o] = {
+                "precision": p_, "recall": r_, "f1": f1(pred, y),
+                "auc": auc([ens[pid][o]["prob_yes"] for pid in order], y),
+            }
+        metrics[ENSEMBLE_NAME]["macro_f1"] = sum(
+            metrics[ENSEMBLE_NAME][o]["f1"] for o in OPTS) / len(OPTS)
+        metrics[ENSEMBLE_NAME]["macro_auc"] = sum(
+            metrics[ENSEMBLE_NAME][o]["auc"] for o in OPTS) / len(OPTS)
+
+        # the degenerate reference every judge has to clear
+        metrics["always-clean baseline"] = {}
+        for o in OPTS:
+            y = [pairs[sp][pid]["labels"][o] for pid in order]
+            metrics["always-clean baseline"][o] = {
+                "precision": float("nan"), "recall": 0.0, "f1": 0.0,
+                "auc": 0.5, "positive_rate": sum(y) / len(y) if y else 0.0}
+        metrics_by_split[sp] = metrics
+    metrics = metrics_by_split[args.splits[0]]
     metrics[ENSEMBLE_NAME]["macro_f1"] = sum(metrics[ENSEMBLE_NAME][o]["f1"] for o in OPTS) / len(OPTS)
     metrics[ENSEMBLE_NAME]["macro_auc"] = sum(metrics[ENSEMBLE_NAME][o]["auc"] for o in OPTS) / len(OPTS)
 
-    # ── GPT holdout: correct flag decisions ──────────────────────────────────
-    hold, n_hold = {}, len(pairs["gpt_test"]) * len(OPTS)
-    for m in MODELS:
-        hold[m] = sum(int((scores["gpt_test"][m][pid][o] > 0.5) == bool(p["labels"][o]))
-                      for pid, p in pairs["gpt_test"].items() for o in OPTS)
-    hold[ENSEMBLE_NAME] = sum(
-        int(ensemble_probs("gpt_test", pid)[o]["flagged"] == bool(p["labels"][o]))
-        for pid, p in pairs["gpt_test"].items() for o in OPTS)
-    n_pos = sum(int(bool(p["labels"][o])) for p in pairs["gpt_test"].values() for o in OPTS)
-    hold["always-clean baseline"] = n_hold - n_pos
-
-    OUT.write_text(json.dumps({
-        "fleet": "CLIP/DINOv2/ResNet/ViT v5 + Qwen2-VL-7B (deployed 2026-07-27)",
-        "note": "vision re-scored on CPU from TactileExpert/models/; "
-                "VLM per-pair scores reused from eval_7b_gate.json (identical adapter md5)",
-        "n_test_pairs": len(pairs["test"]), "n_holdout_decisions": n_hold,
-        "holdout_positives": n_pos,
-        "metrics": metrics, "holdout_correct": hold,
+    out_path.write_text(json.dumps({
+        "fleet": args.fleet,
+        "splits_dir": str(splits_dir),
+        "note": "vision scored on CPU from TactileExpert/models/; "
+                "VLM per-pair scores reused from the VLM gate JSON",
+        "n_pairs": {sp: len(p) for sp, p in pairs.items()},
+        "metrics": metrics,
+        "metrics_by_split": metrics_by_split,
         "results": scores,
     }, indent=2))
 
     hdr = MODELS + [ENSEMBLE_NAME]
-    print("\n\n=== ORIGINAL TEST (153 pairs) — F1 @ t=0.50 ===")
-    print("| Dimension | " + " | ".join(hdr) + " |")
-    for o in OPTS:
-        print(f"| {o} | " + " | ".join(f"{metrics[m][o]['f1']:.3f}" for m in hdr) + " |")
-    print("| **Macro F1** | " + " | ".join(f"{metrics[m]['macro_f1']:.3f}" for m in hdr) + " |")
-    print("| **Macro AUC** | " + " | ".join(f"{metrics[m]['macro_auc']:.3f}" for m in hdr) + " |")
+    for sp in pairs:
+        M = metrics_by_split[sp]
+        n_dec = len(pairs[sp]) * len(OPTS)
+        n_pos = sum(int(bool(p["labels"][o])) for p in pairs[sp].values() for o in OPTS)
+        print(f"\n\n=== {sp.upper()} — {len(pairs[sp])} pairs, {n_dec} decisions, "
+              f"{n_pos} positive ({n_pos/n_dec:.1%}) ===")
+        print(f"    always-clean baseline gets {n_dec-n_pos}/{n_dec} "
+              f"({1-n_pos/n_dec:.1%}) — beat this per option, not in aggregate")
+        for metric in ("precision", "recall", "f1", "auc"):
+            print(f"\n  -- {metric} @ t=0.50 --")
+            print("| Dimension | " + " | ".join(hdr) + " |")
+            for o in OPTS:
+                print(f"| {o} | " + " | ".join(f"{M[m][o][metric]:.3f}" for m in hdr) + " |")
+        print("\n| **Macro F1** | " + " | ".join(f"{M[m]['macro_f1']:.3f}" for m in hdr) + " |")
+        print("| **Macro AUC** | " + " | ".join(f"{M[m]['macro_auc']:.3f}" for m in hdr) + " |")
 
-    print(f"\n=== GPT HOLDOUT ({len(pairs['gpt_test'])} pairs, {n_hold} decisions, "
-          f"{n_pos} positive) — correct decisions ===")
-    for k, v in sorted(hold.items(), key=lambda kv: -kv[1]):
-        print(f"  {k:<24} {v}/{n_hold}  ({v/n_hold:.1%})")
-    print(f"\nsaved -> {OUT}")
+    print(f"\nsaved -> {out_path}")
+    print("Next: mcnemar_gate.py --gate <this file> --vs-always-clean --all-models")
 
 
 if __name__ == "__main__":

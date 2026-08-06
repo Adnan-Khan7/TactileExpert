@@ -16,6 +16,7 @@ export HF_HOME=$SCRATCH/hf_cache TRANSFORMERS_CACHE=$SCRATCH/hf_cache PYTHONUNBU
 # repo / research-workspace anchors (overridable for containers)
 REPO="${TACTILE_REPO:-$HOME/TactileExpert}"
 export TACTILE_DATA_ROOT="${TACTILE_DATA_ROOT:-$HOME/vlm_finetune}"
+set -e
 cd "$TACTILE_DATA_ROOT"
-python "$REPO/research/experiments/rederive_fleet.py"
+python "$REPO/research/experiments/rederive_fleet.py" "$@"
 echo "Finished: $(date)"
