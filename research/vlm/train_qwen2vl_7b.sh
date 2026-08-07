@@ -42,17 +42,38 @@ export TACTILE_DATA_ROOT="${TACTILE_DATA_ROOT:-$HOME/vlm_finetune}"
 cd "$TACTILE_DATA_ROOT"
 mkdir -p logs
 
-echo "Building VQA dataset from the v1 unified splits (idempotent)..."
+# Without this a crashed trainer exits 0 — the trailing `echo` succeeds — and
+# SLURM reports COMPLETED, which is indistinguishable from a result. This has
+# already cost one run on this project.
+set -e
+
+# Output directory is the FIRST POSITIONAL ARG, defaulting to the v1 run so
+# existing invocations behave as before:
+#     sbatch train_qwen2vl_7b.sh output_7b_tv918
+# Each label state gets its own directory. Overwriting one destroys the
+# provenance of numbers already reported from it — history.json, test_metrics.json
+# and train_log.txt are the audit trail for the VLM row in the README — and
+# mcnemar_gate.py needs the previous arm to compare against.
+OUT_DIR="${1:-output_7b_v1}"
+if [ -e "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR" 2>/dev/null)" ] && [ -z "$VLM_FORCE_OVERWRITE" ]; then
+    echo "REFUSING: $OUT_DIR exists and is not empty." >&2
+    echo "  It holds the provenance of an already-reported run. Pass a new" >&2
+    echo "  directory, or set VLM_FORCE_OVERWRITE=1 if you truly mean to replace it." >&2
+    exit 1
+fi
+echo "Output:  $OUT_DIR"
+
+# Rebuilds unconditionally from the splits, so a verification pass that changed
+# labels is picked up. The VQA set is derived data, never a cache.
+echo "Building VQA dataset from the v1 unified splits..."
 python "$REPO/research/vlm/build_vqa_v2.py" \
     --splits-dir data/splits_v3_unified --out-dir data/vqa_v3_unified
 
-# out-dir is output_7b_v1, NOT output_7b: output_7b is the incumbent and is
-# needed as the comparison arm in mcnemar_gate.py.
-echo "Fine-tuning Qwen2-VL-7B on v1..."
+echo "Fine-tuning Qwen2-VL-7B..."
 python "$REPO/research/vlm/step9_finetune_vlm.py" \
     --model-path Qwen/Qwen2-VL-7B-Instruct \
     --vqa-dir data/vqa_v3_unified \
-    --out-dir output_7b_v1 \
+    --out-dir "$OUT_DIR" \
     --seed 43 \
     --patience 5 \
     --epochs 10 \
