@@ -19,15 +19,31 @@ logs/
 # an unanchored pattern silently drops it from a clone.
 images/
 /models/
+# install_fleet.py backs the deployed fleet up next to it before overwriting, so
+# a ~500MB directory lands in the repo root on every install. /models/ does not
+# match it. It stayed untracked only because *.pt and *.safetensors caught the
+# weights individually — the directory itself was never ignored.
+/models_backup_*/
+/models_tv*/
 *.jsonl
 *.xlsx
 *.csv
 *.pt
 *.safetensors
+*.npz
+*.ckpt
+*.bin
 ~$*
 
 # Output / cache
 output/
+# Trainer output roots, in case one is run with the repo as CWD. The trainers
+# take --out-dir/--model-dir and nothing forces them outside the repo, so a
+# mistyped path drops checkpoints here.
+/output_*/
+/sweep_*/
+/experiments_out/
+/_shared_cache/
 *.DS_Store
 
 # Jupyter

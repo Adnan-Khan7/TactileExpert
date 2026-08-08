@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import tempfile
@@ -736,7 +737,7 @@ def main():
     # One save action, one artifact per iteration. The session directory is
     # assigned on first save and reused, so every iteration of a session lands
     # together without a separate "finish the session" step.
-    _session = {"dir": None}
+    _session = {"dir": None, "nat_fp": None, "saved": set()}
 
     def _upsert(path: Path, row: dict, key: str = "pair_id") -> int:
         """Write row, replacing any existing row with the same key.
@@ -770,16 +771,27 @@ def main():
         it  = _state[-1]
         idx = len(_state) - 1
 
-        if _session["dir"] is None:
+        nat_src = next((x["nat_pil"] for x in _state if x.get("nat_pil")), None)
+        if nat_src is None:
+            return "<b style='color:#b00'>No natural reference in this session.</b>"
+
+        # Fingerprint the session's photograph and allocate a new folder whenever
+        # it changes. `natural.jpg` is written only when absent, so reusing a
+        # folder after the photograph changed pairs the OLD photograph with the
+        # NEW rendering — a pair that is not weakly labelled but wrongly labelled,
+        # since every criterion is a statement about the two images together.
+        # on_reset() clears the folder, but a user who swaps the photograph
+        # without resetting reaches the same state, so it is caught here too.
+        nat_fp = hashlib.sha1(nat_src.tobytes()).hexdigest()
+        if _session["dir"] is None or _session.get("nat_fp") not in (None, nat_fp):
             _session["dir"] = TRAIN_DIR / f"pair_{datetime.now():%Y%m%d_%H%M%S}"
+            _session["nat_fp"] = nat_fp
+        _session["nat_fp"] = nat_fp
         pdir = _session["dir"]
         pdir.mkdir(parents=True, exist_ok=True)
 
         nat_out = pdir / "natural.jpg"
         if not nat_out.exists():
-            nat_src = next((x["nat_pil"] for x in _state if x.get("nat_pil")), None)
-            if nat_src is None:
-                return "<b style='color:#b00'>No natural reference in this session.</b>"
             nat_src.save(nat_out, format="JPEG", quality=95)
         tac_out = pdir / f"tactile_iter{idx}.jpg"
         it["pil"].save(tac_out, format="JPEG", quality=95)
@@ -795,13 +807,22 @@ def main():
                "synthetic_corruption": bool(synthetic), **labels}
         n = _upsert(TRAIN_DIR / "annotations.jsonl", row)
 
+        # Record ONLY the iterations that were explicitly saved. Previously every
+        # iteration in _state was written, so the session log carried edits that
+        # were tried and rejected — including instructions the annotator chose not
+        # to keep because the attempt was not good enough. Those are not data: the
+        # log then implies a labelled pair exists for an iteration that has no
+        # image and no label row, and any later analysis of "what was asked for"
+        # would be reading discarded attempts as if they were kept ones.
+        saved = _session.setdefault("saved", set())
+        saved.add(idx)
         sess = {"session_id": pdir.name, "object": row["object"],
                 "updated_at": row["saved_at"],
                 "synthetic_corruption": bool(synthetic),
                 "iterations": [{"index": i, "label": x.get("label", ""),
                                 "instruction": x.get("instruction", ""),
                                 "scores": _iter_scores(x, selected_models)}
-                               for i, x in enumerate(_state)]}
+                               for i, x in enumerate(_state) if i in saved]}
         _upsert(TRAIN_DIR / "sessions.jsonl", sess, key="session_id")
 
         n_pos = sum(labels.values())
@@ -832,8 +853,26 @@ def main():
         return tmp.name
 
     def on_reset():
+        """Clear the session — including its output directory.
+
+        `_session["dir"]` MUST be cleared here. It is set on the first save and
+        reused for every later save so that the iterations of one session share a
+        folder. Leaving it set across a reset silently merged the next session
+        into the previous one's folder: `_state` restarts empty, so the iteration
+        index restarts at 0, so the next save wrote the same
+        `tactile_iter0.jpg` and the same `pair_id` — overwriting the earlier
+        image and upserting over its label row.
+
+        Worse, `natural.jpg` is only written when absent, so the surviving row
+        paired the FIRST session's photograph with the SECOND session's tactile
+        rendering. Every criterion is relational, so a mismatched pair is not a
+        weak label, it is a wrong one.
+        """
         _state.clear()
         _edit_history.clear()
+        _session["dir"] = None
+        _session["nat_fp"] = None
+        _session["saved"] = set()
         empty_tbl = _eval_table({}, DEFAULT_THRESHOLD_MODE)
         return (
             None, None, empty_tbl,
@@ -844,6 +883,8 @@ def main():
             gr.update(value=""),
             gr.update(value=None),
             "",
+            "",          # step_label_status — a stale "Saved …" line after a
+                         # reset reads as if the new session were already saved.
         )
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -1116,7 +1157,7 @@ def main():
             fn=on_reset,
             outputs=[nat_img, tac_out, eval_table, all_clear_box,
                      strip_html, edit_log_html, iter_gallery, edit_box,
-                     target_dropdown, err_box],
+                     target_dropdown, err_box, step_label_status],
         )
 
         # ── Object auto-detection on image upload ──────────────────────────────

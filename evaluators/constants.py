@@ -30,6 +30,84 @@ DIMENSION_LABELS = {
 
 # non_conformant removed per advisor feedback — too subjective, confuses models.
 
+# ── HUMAN ANNOTATION CRITERIA ─────────────────────────────────────────────────
+# THE AUTHORITATIVE DEFINITION OF EACH LABEL, for the person annotating.
+#
+# This is NOT the text the VLM is prompted with — that is QUESTIONS below, and
+# the two deliberately differ right now. See the note on QUESTIONS for why.
+# When they disagree, THIS block is what a human label means.
+#
+# Grounded in the BANA Guidelines and Standards for Tactile Graphics:
+#   https://www.brailleauthority.org/tg/web-manual/tgmanual.html
+# Wording taken from research/vlm/questions_v4_bana.py, which cites the specific
+# sections; that file is parked pending a VLM retrain, but its definitions are
+# the ones annotation follows.
+#
+# `missing_texture` is the one that has caused real disagreement, so state it
+# plainly: the test is NOT "did the reference photograph have a texture that the
+# rendering dropped". A photograph has no tactile texture to drop. The test is
+# whether the RENDERING gives a fingertip enough differentiation to tell one
+# surface from the next. Texture is expected to be present and to differ between
+# adjacent regions (BANA 2.11, 3.2.2 — up to five discriminable area textures,
+# patterns from different families adjacent to one another). So a rendering whose
+# regions are blank, or all share one fill, or carry a fill so sparse that the
+# regions still read the same, is `missing_texture = 1` — even when the
+# photograph itself showed little visible surface detail.
+ANNOTATION_CRITERIA = {
+    "too_thick": (
+        "Are any lines or filled areas so thick, or so close together, that "
+        "adjacent components merge and can no longer be told apart by touch, or "
+        "that fine detail collapses into a solid mass?  [BANA 2.11, 5.9.3.2, "
+        "3.4.3.12 — minimum 1/8 inch separation]"
+    ),
+    "broken_lines": (
+        "Ignoring texture fills, and ignoring deliberate design choices such as "
+        "a dashed line style or a small break where one line crosses another, "
+        "does any outline have unintended gaps, so that a fingertip tracing "
+        "that edge would lose the line?  [BANA 3.4.3.3, 2.11]"
+    ),
+    "missing_parts": (
+        "Is any part essential to recognising the object absent, so that its "
+        "omission compromises the intent of the graphic? Omitted background, "
+        "scenery and non-essential detail are expected simplifications, not "
+        "defects.  [BANA 2.8, 3.6.1, 3.7.1]"
+    ),
+    "missing_texture": (
+        "Do any two adjacent regions that represent different surfaces, "
+        "materials or depths carry the same fill, or no fill at all, so that a "
+        "fingertip cannot tell where one region ends and the next begins? "
+        "Texture SHOULD be present and SHOULD differ between adjacent regions — "
+        "blank regions, a single uniform fill across regions that need "
+        "distinguishing, or a fill too sparse to read as its own surface all "
+        "count.  [BANA 2.11, 3.2.2, 3.4.3.1]"
+    ),
+    "extra_parts": (
+        "Does the graphic include anything that does not belong to the object "
+        "itself — background, ground, scenery, frames or borders, text or logos, "
+        "or stray clutter lines — adding tactile clutter without serving the "
+        "concept?  [BANA 2.5, 2.6, 3.7.1]"
+    ),
+}
+
+# ── VLM PROMPT TEXT — NOT the annotation criteria ─────────────────────────────
+# These are the questions the fine-tuned VLM is asked, at BOTH training
+# (research/vlm/build_vqa_v2.py restates them) and inference (vlm_eval.py,
+# eval_full_v4.py, derive_val_thresholds.py).
+#
+# ⚠ DO NOT "fix" THESE TO MATCH ANNOTATION_CRITERIA WITHOUT A RETRAIN.
+# The deployed adapter was fine-tuned on this exact wording. Editing it here
+# alone would prompt the model with text it never saw — the C1 train/inference
+# drift bug, reintroduced. Changing them means: edit both copies, rebuild the
+# VQA set, retrain, re-gate, then redo thresholds and ensemble weights.
+#
+# `missing_texture` below is the clearest disagreement: it asks whether fills
+# "present in the reference image" were omitted, which is presence/absence
+# against the photograph. The human criterion is adjacency-based — see
+# ANNOTATION_CRITERIA. A BANA-aligned replacement is drafted and gated in
+# research/vlm/questions_v4_bana.py; it was parked because the retrain showed no
+# significant gain and `broken_lines` overshot. That file says to revisit once
+# the holdout has more than 8 positives, i.e. after synthetic-corruption
+# collection — which is now underway.
 QUESTIONS = {
     # v3: outline-only definition — MUST match the question the deployed VLM
     # checkpoint was fine-tuned with (code/vlm/build_vqa_v2.py).
@@ -116,66 +194,76 @@ SYSTEM_PROMPT = (
 #   balanced   — fixed t = 0.50 for every option (all-clear state reachable)
 #   calibrated — per-option val-F1-maximising thresholds
 #
-# !! CALIBRATED IS STALE FOR THE CURRENT FLEET AND DISABLED IN THE UI !!
-# Every dict below predates the v5 + Qwen2-VL-7B deploy (2026-07-27):
-#   * VLM values are Qwen2-VL-2B v3's (0.05–0.25). The deployed 7B was gated
-#     entirely at t = 0.50; at 0.05 it flags almost everything.
-#   * ResNet-50 / ViT-B/16 values are June v2, applied to v5 weights, and the
-#     backbone checkpoints ship no thresholds to override them.
-#   * CLIP / DINOv2 v5 checkpoints DO carry their own thresholds and override
-#     these at load time (see each evaluator's `cal_thresholds` read).
-# Regenerate all five sets against the deployed fleet before re-enabling the
-# UI radio in app.py.
+# CURRENT FLEET: 918-verified labels, installed 2026-08-07 (see
+# models/FLEET_MANIFEST.json). Vision judges seed 42, VLM seed 43.
+#
+# THRESHOLDS DO NOT SURVIVE A RETRAIN. They are fitted to a fleet's score
+# distribution, so every fleet install must be followed by
+#     sbatch research/experiments/run_derive_thresholds.sh --split val \
+#         --out experiments_out/val_thresholds_<fleet>.json
+# and the five dicts below replaced. How much they move is not marginal: the
+# 918-verified relabelling raised train `too_thick` positives 166 -> 224, and the
+# val-fitted `too_thick` threshold went 0.30 -> 0.65 for ResNet-50 and
+# 0.50 -> 0.90 for ViT-B/16. Scoring the new fleet through the old operating
+# points misreads it badly, and at a flat 0.50 it looks WORSE on `too_thick` than
+# the fleet it replaced while its AUC is unchanged.
+#
+# Values below are from experiments_out/val_thresholds_tv918.json (val split,
+# 174 pairs, F1-maximising per option per judge). Fitted on VAL, never test.
+#
+# CLIP / DINOv2 checkpoints also carry their own `cal_thresholds` and override
+# these at load time; those are written by the same val pass during training.
 
 THRESHOLD_MODES = ["balanced", "calibrated"]
 DEFAULT_THRESHOLD_MODE = "calibrated"
 
 BALANCED_THRESHOLDS = {opt: 0.50 for opt in ALL_OPTIONS}
 
-# Val-calibrated thresholds — CLIP Probe v3 (trajectory-collection GPT data)
+# Val-calibrated — CLIP Probe, 918-verified fleet (2026-08-07)
 CLIP_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.70,
+    "too_thick":       0.50,
     "broken_lines":    0.60,
     "missing_parts":   0.50,
-    "missing_texture": 0.50,
+    "missing_texture": 0.55,
     "extra_parts":     0.50,
 }
 
-# Val-calibrated thresholds — VLM Fine-tuned v3 (Qwen2-VL-2B, reworded
-# broken_lines question, epoch 4)
+# Val-calibrated — VLM Fine-tuned (Qwen2-VL-7B LoRA), 918-verified fleet
+# (2026-08-07). Low values are correct, not a bug: the scores are a softmax over
+# yes/no logits and sit near zero on the rare options.
 VLM_THRESHOLDS_CALIBRATED = {
     "too_thick":       0.05,
-    "broken_lines":    0.10,
-    "missing_parts":   0.40,
-    "missing_texture": 0.05,
-    "extra_parts":     0.05,
-}
-
-# Val-calibrated thresholds — ResNet-50 v2 (retrained June 2026)
-RESNET_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.30,
-    "broken_lines":    0.45,
-    "missing_parts":   0.40,
-    "missing_texture": 0.50,
-    "extra_parts":     0.05,
-}
-
-# Val-calibrated thresholds — ViT-B/16 v2 (retrained June 2026)
-VIT_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.50,
     "broken_lines":    0.20,
-    "missing_parts":   0.05,
-    "missing_texture": 0.10,
-    "extra_parts":     0.80,
+    "missing_parts":   0.70,
+    "missing_texture": 0.30,
+    "extra_parts":     0.10,
 }
 
-# Val-calibrated thresholds — DINOv2 ViT-L/14 probe v3 (trajectory-collection GPT data)
+# Val-calibrated — ResNet-50, 918-verified fleet (2026-08-07)
+RESNET_THRESHOLDS_CALIBRATED = {
+    "too_thick":       0.65,
+    "broken_lines":    0.45,
+    "missing_parts":   0.35,
+    "missing_texture": 0.50,
+    "extra_parts":     0.35,
+}
+
+# Val-calibrated — ViT-B/16, 918-verified fleet (2026-08-07)
+VIT_THRESHOLDS_CALIBRATED = {
+    "too_thick":       0.90,
+    "broken_lines":    0.05,
+    "missing_parts":   0.05,
+    "missing_texture": 0.40,
+    "extra_parts":     0.50,
+}
+
+# Val-calibrated — DINOv2 ViT-L/14 probe, 918-verified fleet (2026-08-07)
 DINO_THRESHOLDS_CALIBRATED = {
-    "too_thick":       0.50,
-    "broken_lines":    0.60,
-    "missing_parts":   0.40,
-    "missing_texture": 0.85,
-    "extra_parts":     0.40,
+    "too_thick":       0.55,
+    "broken_lines":    0.50,
+    "missing_parts":   0.65,
+    "missing_texture": 0.75,
+    "extra_parts":     0.55,
 }
 
 # Backward-compatible aliases

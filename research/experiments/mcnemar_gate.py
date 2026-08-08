@@ -67,18 +67,34 @@ def load_labels(split, splits_dir):
     return pairs
 
 
-def decisions(gate_json, model, split, labels):
-    """{(pair_id, option): was_correct} at the deployed threshold."""
+def decisions(gate_json, model, split, labels, thresholds=None):
+    """{(pair_id, option): was_correct} at the operating point.
+
+    A flat t=0.50 is the wrong operating point for several judges, and the error
+    is not symmetric across options. The VLM's scores are a softmax over yes/no
+    logits and sit near zero on rare options — at 0.50 it flags a handful of
+    pairs on `too_thick` while its AUC there is far above chance. Retraining also
+    MOVES the score distribution: after the 918-verified relabelling, val-derived
+    `too_thick` thresholds went 0.30 -> 0.65 for ResNet-50 and 0.50 -> 0.90 for
+    ViT-B/16. Comparing two fleets at a shared flat 0.50 therefore penalises
+    whichever one flags more, independently of whether it discriminates better.
+
+    Pass `thresholds` ({model: {option: t}}, from derive_val_thresholds.py) to
+    score each judge at its own val-fitted operating point. Thresholds are fitted
+    parameters and come from VAL — never from the split being reported.
+    """
     res = gate_json["results"][split]
     if model not in res:
         raise SystemExit(f"model {model!r} not in {split}; have {sorted(res)}")
+    per_model = (thresholds or {}).get(model, {})
     out = {}
     for pid, per_opt in res[model].items():
         if pid not in labels:
             continue
         for o in OPTS:
             if o in per_opt and o in labels[pid]:
-                out[(pid, o)] = (per_opt[o] > THRESH) == bool(labels[pid][o])
+                t = per_model.get(o, THRESH)
+                out[(pid, o)] = (per_opt[o] > t) == bool(labels[pid][o])
     return out
 
 
@@ -122,8 +138,12 @@ def subset(dec, opt):
     return {k: v for k, v in dec.items() if k[1] == opt}
 
 
-def prf_auc(gate_json, model, split, labels, opt):
-    """Per-option precision / recall / F1 / AUC for one model."""
+def prf_auc(gate_json, model, split, labels, opt, thresholds=None):
+    """Per-option precision / recall / F1 / AUC for one model.
+
+    Uses the SAME operating point as decisions(), so the F1 printed here cannot
+    disagree with the McNemar result above it. AUC is threshold-free either way.
+    """
     res = gate_json["results"][split][model]
     y, s = [], []
     for pid in sorted(labels):
@@ -132,7 +152,8 @@ def prf_auc(gate_json, model, split, labels, opt):
             s.append(float(res[pid][opt]))
     if not y:
         return None
-    pred = [int(v > THRESH) for v in s]
+    t = (thresholds or {}).get(model, {}).get(opt, THRESH)
+    pred = [int(v > t) for v in s]
     tp = sum(1 for p, t in zip(pred, y) if p and t)
     fp = sum(1 for p, t in zip(pred, y) if p and not t)
     fn = sum(1 for p, t in zip(pred, y) if not p and t)
@@ -167,12 +188,12 @@ def print_per_option(title, a_name, b_name, a_dec, b_dec, alpha):
     return rows, agg
 
 
-def print_prf_table(gate_json, model, split, labels):
+def print_prf_table(gate_json, model, split, labels, thresholds=None):
     print(f"\n  per-option quality — {model}")
     print(f"    {'option':<18}{'n':>6}{'pos':>6}{'prec':>8}{'recall':>8}{'F1':>8}{'AUC':>8}")
     macro = {"f1": [], "auc": []}
     for o in OPTS:
-        m = prf_auc(gate_json, model, split, labels, o)
+        m = prf_auc(gate_json, model, split, labels, o, thresholds)
         if not m:
             continue
         macro["f1"].append(m["f1"])
@@ -200,8 +221,23 @@ def main():
                     help="v1 has no gpt_test — the two-corpus regime was retired")
     ap.add_argument("--splits-dir", default=None)
     ap.add_argument("--alpha", type=float, default=0.05)
+    ap.add_argument("--thresholds", default=None,
+                    help="derive_val_thresholds.py JSON — score each judge at its "
+                         "own val-fitted operating point instead of a flat 0.50")
     ap.add_argument("--out", default=None, help="write results as JSON")
     args = ap.parse_args()
+
+    thresholds = None
+    if args.thresholds:
+        tj = json.loads(Path(args.thresholds).read_text())
+        if tj.get("split") == args.split:
+            # Thresholds chosen on the split being reported are selection bias:
+            # 25 parameters fitted against the headline number.
+            raise SystemExit(
+                f"REFUSING: {args.thresholds} was fitted on '{tj['split']}', which is "
+                f"the split being reported. Fit thresholds on val and report on test.")
+        thresholds = tj.get("thresholds", tj)
+        print(f"thresholds: {args.thresholds} (fitted on {tj.get('split', '?')})")
 
     splits_dir = Path(args.splits_dir) if args.splits_dir else SPLITS
     labels = load_labels(args.split, splits_dir)
@@ -230,22 +266,23 @@ def main():
         for m in models:
             rows, agg = print_per_option(
                 f"McNemar — ALWAYS-CLEAN vs {m}",
-                "always-clean", m, base, decisions(gate, m, args.split, labels),
+                "always-clean", m, base, decisions(gate, m, args.split, labels, thresholds),
                 args.alpha)
-            print_prf_table(gate, m, args.split, labels)
+            print_prf_table(gate, m, args.split, labels, thresholds)
             out["comparisons"].append({"mode": "vs_always_clean", "model": m,
                                        "per_option": rows, "aggregate": agg})
 
     if args.ensemble_vs_best:
         ens = ensemble_decisions(gate, args.split, labels)
         members = list(gate["results"][args.split])
-        scored = {m: sum(decisions(gate, m, args.split, labels).values()) for m in members}
+        scored = {m: sum(decisions(gate, m, args.split, labels, thresholds).values())
+                  for m in members}
         best = max(scored, key=scored.get)
         print(f"\nbest single member by correct decisions: {best} "
               f"({scored[best]}/{n_dec})")
         rows, agg = print_per_option(
             f"McNemar — {best} vs ENSEMBLE",
-            best, "ensemble", decisions(gate, best, args.split, labels), ens,
+            best, "ensemble", decisions(gate, best, args.split, labels, thresholds), ens,
             args.alpha)
         out["comparisons"].append({"mode": "ensemble_vs_best", "best_member": best,
                                    "member_correct": scored,
@@ -262,8 +299,8 @@ def main():
             rows, agg = print_per_option(
                 f"McNemar — incumbent vs candidate — {m}",
                 "incumbent", "candidate",
-                decisions(inc_j, m, args.split, labels),
-                decisions(cand_j, m, args.split, labels), args.alpha)
+                decisions(inc_j, m, args.split, labels, thresholds),
+                decisions(cand_j, m, args.split, labels, thresholds), args.alpha)
             out["comparisons"].append({"mode": "incumbent_vs_candidate", "model": m,
                                        "per_option": rows, "aggregate": agg})
 

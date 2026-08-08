@@ -28,7 +28,7 @@ from _paths import DATA_ROOT  # noqa: E402
 
 import argparse
 import json
-import math
+import re
 import statistics
 from collections import defaultdict
 
@@ -43,34 +43,23 @@ DISPLAY = {
     "clip_probe": "CLIP Probe",
     "dino_probe": "DINOv2 Probe",
 }
+VLM_DISPLAY = "VLM Fine-tuned"
 
 
 def load_sweep(root: Path):
-    """model -> option -> metric -> [values across seeds]  (+ seeds seen)."""
-    try:
-        import torch
-    except ImportError:
-        raise SystemExit("torch not importable — activate the venv first:\n"
-                         "  source $TACTILE_DATA_ROOT/venv/bin/activate")
+    """model -> option -> metric -> [values across seeds]  (+ seeds seen).
 
+    Handles both sweep layouts:
+      * vision judges — `*_evaluator.pt` checkpoints carrying `seed` and
+        `test_results` inside the torch archive
+      * the VLM — `s<seed>/test_metrics.json`, because a LoRA run writes an
+        adapter plus JSON metrics rather than a self-describing checkpoint
+    """
     acc = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     seeds = defaultdict(set)
-    per_seed_macro = defaultdict(lambda: defaultdict(dict))   # model -> seed -> opt -> (f1, auc)
+    per_seed_macro = defaultdict(lambda: defaultdict(dict))   # model -> seed -> opt -> metrics
 
-    ckpts = sorted(root.rglob("*_evaluator.pt"))
-    if not ckpts:
-        raise SystemExit(f"no *_evaluator.pt under {root}")
-
-    for p in ckpts:
-        model = next((DISPLAY[k] for k in DISPLAY if k in p.parts or k in p.name), None)
-        if model is None:
-            continue
-        d = torch.load(p, map_location="cpu", weights_only=False)
-        seed = d.get("seed")
-        tr = d.get("test_results") or {}
-        per = tr.get("per_option") or {}
-        if seed is None or not per:
-            continue
+    def record(model, seed, per):
         seeds[model].add(seed)
         for opt, m in per.items():
             if opt not in OPTS:
@@ -79,6 +68,38 @@ def load_sweep(root: Path):
                 if m.get(metric) is not None:
                     acc[model][opt][metric].append(float(m[metric]))
                     per_seed_macro[model][seed].setdefault(opt, {})[metric] = float(m[metric])
+
+    ckpts = sorted(root.rglob("*_evaluator.pt"))
+    if ckpts:
+        try:
+            import torch
+        except ImportError:
+            raise SystemExit("torch not importable — activate the venv first:\n"
+                             "  source $TACTILE_DATA_ROOT/venv/bin/activate")
+        for p in ckpts:
+            model = next((DISPLAY[k] for k in DISPLAY if k in p.parts or k in p.name), None)
+            if model is None:
+                continue
+            d = torch.load(p, map_location="cpu", weights_only=False)
+            seed = d.get("seed")
+            per = (d.get("test_results") or {}).get("per_option") or {}
+            if seed is not None and per:
+                record(model, seed, per)
+
+    # VLM: seed comes from the s<N> directory name, since test_metrics.json does
+    # not carry it. Only directories matching that convention are read, so a
+    # one-off run in an arbitrary directory is ignored rather than mis-seeded.
+    for p in sorted(root.rglob("test_metrics.json")):
+        seed_dir = next((q for q in p.parents if re.fullmatch(r"s\d+", q.name)), None)
+        if seed_dir is None:
+            continue
+        per = (json.loads(p.read_text()) or {}).get("per_option") or {}
+        if per:
+            record(VLM_DISPLAY, int(seed_dir.name[1:]), per)
+
+    if not seeds:
+        raise SystemExit(f"no per-seed metrics found under {root} "
+                         f"(looked for *_evaluator.pt and s<N>/test_metrics.json)")
     return acc, seeds, per_seed_macro
 
 
@@ -126,7 +147,7 @@ def main():
         root = (DATA_ROOT / root).resolve()
     acc, seeds, per_seed = load_sweep(root)
 
-    models = [m for m in DISPLAY.values() if m in acc]
+    models = [m for m in list(DISPLAY.values()) + [VLM_DISPLAY] if m in acc]
     print(f"sweep: {root}")
     for m in models:
         print(f"  {m:14} {len(seeds[m]):2} seeds")
@@ -187,10 +208,14 @@ def main():
         print("README-READY — paste under the meeting date, keep the headers identical")
         print("=" * 78)
         print()
+        # Seed count is per row, not a footnote: mixing seed counts in one table is
+        # exactly how a low-seed variance estimate gets quoted as though it were
+        # settled. A row below the full sweep width should not be presented.
         print("| Model | Macro AUC | Macro F1 | "
-              + " | ".join(f"AUC {o}" for o in OPTS) + " |")
-        print("|---|" + "---|" * (2 + len(OPTS)))
+              + " | ".join(f"AUC {o}" for o in OPTS) + " | Seeds |")
+        print("|---|" + "---|" * (3 + len(OPTS)))
         order = sorted(models, key=lambda m: -(macro_across_seeds(per_seed[m], "auc")[0] or 0))
+        width = max(len(seeds[m]) for m in models)
         for m in order:
             ma = macro_across_seeds(per_seed[m], "auc")
             mf = macro_across_seeds(per_seed[m], "f1")
@@ -198,10 +223,16 @@ def main():
                 mean, sd = v
                 return "—" if mean is None else (f"{mean:.3f} ±{sd:.3f}" if sd else f"{mean:.3f}")
             cells = [c(stats(acc[m][o].get("auc", []))) for o in OPTS]
-            print(f"| {m} | {c(ma)} | {c(mf)} | " + " | ".join(cells) + " |")
+            n = len(seeds[m])
+            flag = "" if n == width else f" / {width}"
+            print(f"| {m} | {c(ma)} | {c(mf)} | " + " | ".join(cells)
+                  + f" | {n}{flag} |")
         print()
-        print(f"_{len(seeds[models[0]])} seeds, mean ± 2σ. Test split. "
-              f"Sweep: `{root.name}`._")
+        print(f"_Mean ± 2σ over seeds. Test split. Sweep: `{root.name}`._")
+        short = [m for m in models if len(seeds[m]) < width]
+        if short:
+            print(f"_⚠ incomplete, do not quote: {', '.join(short)} "
+                  f"(fewer than {width} seeds)._")
 
     if args.out:
         Path(args.out).write_text(json.dumps(summary, indent=2))
