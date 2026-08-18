@@ -53,7 +53,12 @@ FAMILY="$1"; OUT_ROOT="$2"; shift 2
 SEEDS=("$@")
 [ ${#SEEDS[@]} -eq 0 ] && SEEDS=(1 2 3 4 5 6 7 8 9 10 11 12)
 
-SPLITS="$TACTILE_DATA_ROOT/data/splits_v3_unified"
+# Overridable so the SAME models can be re-evaluated on a different TEST set.
+# Keep train/ and val/ identical and vary only test.jsonl: seeds are fixed, so the
+# checkpoints come out bit-identical and the only thing that moves is the
+# evaluation set. That isolates a test-set change from a learning effect without
+# retraining anything conceptually different.
+SPLITS="${TACTILE_SPLITS:-$TACTILE_DATA_ROOT/data/splits_v3_unified}"
 CACHE="$OUT_ROOT/_shared_cache"
 
 echo "family=$FAMILY  out=$OUT_ROOT  seeds=${SEEDS[*]}"

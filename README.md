@@ -22,22 +22,21 @@ Work completed since 2026-08-06.
 
 | Item | State for this meeting | Change since 2026-08-06 |
 |---|---|---|
-| Train label verification | **complete — 918/918 pairs** | 407 trained-on → **918**; the last 511 merged this period |
-| Dataset v1 | **1,275 pairs, 6,375 decisions, 100% verified** | train closed; val/test already at 100% |
-| Label corrections merged | 531 flips over 2,555 decisions (20.7%) | new |
+| Dataset | **1,350 pairs, 6,750 decisions, 100% human-verified** | 1,275 → 1,350; train verification closed at 918/918, then +75 collected |
+| Label verification | complete on all splits | 511 pairs merged, 531 flips (20.7%) |
 | Label-noise finding | **replicated** on an independent 511-pair set | was a single-split observation |
-| Retrain at 918-verified labels | **complete** — all 5 judges × 12 seeds | new |
-| Retrain result (AUC) | `broken_lines` and `extra_parts` gain on 3 of 5 each, **`too_thick` on none** | new |
-| Retrain result (decisions) | **all 5 judges now beat always-clean**, up from 3 of 5 | new |
-| `broken_lines` vs a constant | significantly worse on **2 of 5**, down from **4 of 5** | the §5d prediction, confirmed |
-| Best judge | **VLM, macro AUC 0.814 ±0.027 / F1 0.621 ±0.027** | now leads both metrics, with error bars |
-| Deployed fleet | 918-verified installed, thresholds re-derived on val | app was on the 407 fleet |
-| Collection round 2 | **paused at 4 labelled pairs** — resumes when more samples come in | v2 corpus was empty |
+| Collection round 2 | **75 pairs / 52 sessions**, 48% deliberate corruptions | v2 corpus was empty |
+| Retrains completed | **3 full 12-seed sweeps** of all 5 judges (918, tv974, tv974-frozen-test) | new |
+| Best judge | **VLM — macro AUC 0.826 ±0.018, F1 0.623 ±0.028** | leads both metrics, with error bars |
+| Did relabelling help? | **yes** — `broken_lines` and `extra_parts` gained on 3 of 5 judges | §5e |
+| Did the +75 new pairs help? | **no measurable effect yet** — 0 of 48 comparisons detected | §5c, controlled |
+| `too_thick` | still unimproved by any data change, on all 5 judges | now the standing open problem |
 | Proposal Ch. 1–4 | ready to send | unchanged |
 
-**Headline:** the training set is now fully verified. The label-noise finding
-replicated, and the retrain confirms it **selectively** — the two options whose
-labels were corrected in a consistent direction improved; `too_thick` did not.
+**Headline.** Correcting labels helped and is measurable. Adding 6% more data did
+not, and a controlled experiment shows the apparent gain was the test set, not
+learning. `too_thick` resists every data-side intervention tried so far, which
+moves the open question from annotation to architecture — see §10.
 
 ---
 
@@ -91,160 +90,127 @@ identity, so they stayed valid and the retrain skipped feature extraction.
 
 ## 3. Dataset state
 
-Re-issued whenever the dataset changes. Unchanged tables are carried forward as-is.
+Re-issued whenever the dataset changes. **Changed this period:** 75 collected pairs
+were ingested on 2026-08-17, split by session at v1's own 72/14/14 ratio.
 
-| Split | Pairs | Decisions | Positive | Always-clean baseline | Human-verified |
-|---|---|---|---|---|---|
-| train | 918 | 4,590 | 37.4% | 62.6% | **918/918 (100%)** |
-| val | 174 | 870 | 34.3% | 65.7% | **174/174 (100%)** |
-| test | 183 | 915 | 34.6% | 65.4% | **183/183 (100%)** |
-| **total** | **1,275** | **6,375** | — | — | **100%** |
+| Split | Pairs | Decisions | Positive | Always-clean baseline | Human-verified | of which v2 |
+|---|---|---|---|---|---|---|
+| train | 974 | 4,870 | 36.7% | 63.3% | **974/974 (100%)** | 56 |
+| val | 183 | 915 | 33.9% | 66.1% | **183/183 (100%)** | 9 |
+| test | 193 | 965 | 34.2% | 65.8% | **193/193 (100%)** | 10 |
+| **total** | **1,350** | **6,750** | — | — | **100%** | **75** |
+
+Previous state for comparison: 1,275 pairs / 6,375 decisions, test 183, always-clean
+65.4%. The whole corpus remains 100% human-verified.
 
 ### 3a. Positives per option
 
 | Option | train | val | test | test as % |
 |---|---|---|---|---|
-| `missing_texture` | 611 | 127 | 135 | 73.8% |
-| `missing_parts` | 363 | 62 | 68 | 37.2% |
-| `extra_parts` | 346 | 48 | 50 | 27.3% |
-| `too_thick` | 224 | 25 | 26 | 14.2% |
-| `broken_lines` | 173 | 36 | 38 | 20.8% |
+| `missing_texture` | 617 | 131 | 136 | 70.5% |
+| `missing_parts` | 369 | 63 | 71 | 36.8% |
+| `extra_parts` | 361 | 48 | 53 | 27.5% |
+| `broken_lines` | 183 | 36 | 39 | 20.2% |
+| `too_thick` | 259 | 32 | 31 | 16.1% |
 
 The five options are independent binary questions, not mutually exclusive.
-Test = 152 library + 31 generated pairs.
 
----
+### 3b. Composition of the 75 new pairs
 
-## 4. Which labels each result was measured at
+| | |
+|---|---|
+| Sessions | 52 |
+| Deliberate corruptions | 36 of 75 (48%) |
+| `too_thick` positives | 47 (63% of the new pairs, against 14% in v1 test) |
+| `broken_lines` positives | 11 (was 0 at the previous meeting) |
+| All-clean pairs | 13 |
 
-Results are not comparable across label states, so every table below is stamped.
+Collection deliberately targeted the two thin classes. Train `too_thick` positives
+went 224 → 259 and `broken_lines` 173 → 183. Because the new material is far more
+`too_thick`-heavy than v1, the corpus balance shifts as collection grows — the mix
+is recorded here at every ingest.
 
-| Label state | Train pairs verified | Used by | Reported at |
-|---|---|---|---|
-| **407-verified** | 407 / 918 (44.3%) | the deployed fleet in `models/` | 2026-08-06 |
-| **918-verified** | 918 / 918 (100%) | the retrain in §5 | **2026-08-21** |
+## 4. Which dataset each result was measured on
 
-**Clarification on the previous meeting.** The fleet presented on 2026-08-06 was
-trained on **407** verified train pairs. By the meeting date **506** train pairs
-had been labelled, so roughly **99 labels existed that training had not used**.
-Those, plus the rest of the queue, are the 511 merged this period.
+Results are not comparable across dataset states, so every table is stamped.
 
----
+| State | Train | Val | Test | Reported at |
+|---|---|---|---|---|
+| 407-verified | 407 / 918 | 174 | 183 | 2026-08-06 |
+| 918-verified | 918 / 918 | 174 | 183 | interim |
+| **tv974 (current)** | **974** | **183** | **193** | **2026-08-21** |
+
+tv974 is the first state whose **evaluation splits changed**. The frozen pre-ingest
+test pair list is preserved at `data/frozen_v1_test_pairs.json`, and all 183 survive
+inside the new 193-pair test — which is what makes §5c possible.
 
 ## 5. Evaluator results — test split
 
-183 pairs, 915 decisions. Always-clean baseline **598/915 = 65.4%**.
+**Dataset: tv974.** 193 pairs, 965 decisions. Always-clean baseline
+**635/965 = 65.8%**. All five judges, 12 seeds each, mean ± 2σ.
 
-### 5a. AUC at 918-verified labels — primary comparison metric
-
-12-seed sweep, mean ± 2σ. **Label state: 918-verified.**
+### 5a. AUC — primary comparison metric
 
 | Model | Macro AUC | `too_thick` | `broken_lines` | `missing_parts` | `missing_texture` | `extra_parts` | Seeds |
 |---|---|---|---|---|---|---|---|
-| VLM Fine-tuned (7B) | **0.814 ±0.027** | 0.759 ±0.077 | **0.773 ±0.027** | 0.820 ±0.043 | **0.955 ±0.020** | **0.765 ±0.061** | 12 |
-| CLIP Probe | 0.783 ±0.011 | 0.678 ±0.037 | 0.723 ±0.017 | **0.839 ±0.019** | 0.906 ±0.014 | 0.768 ±0.027 | 12 |
-| ViT-B/16 | 0.783 ±0.025 | **0.824 ±0.044** | 0.705 ±0.054 | 0.800 ±0.061 | 0.894 ±0.044 | 0.690 ±0.035 | 12 |
-| ResNet-50 | 0.777 ±0.020 | 0.720 ±0.063 | 0.741 ±0.050 | 0.820 ±0.039 | 0.907 ±0.042 | 0.697 ±0.048 | 12 |
-| DINOv2 Probe | 0.765 ±0.023 | 0.694 ±0.102 | 0.758 ±0.023 | 0.780 ±0.036 | 0.886 ±0.019 | 0.707 ±0.035 | 12 |
+| VLM Fine-tuned (7B) | **0.826 ±0.018** | 0.794 ±0.057 | **0.780 ±0.057** | 0.817 ±0.038 | **0.963 ±0.016** | **0.776 ±0.036** | 12 |
+| CLIP Probe | 0.790 ±0.014 | 0.704 ±0.023 | 0.737 ±0.019 | **0.832 ±0.037** | 0.914 ±0.015 | 0.762 ±0.039 | 12 |
+| ViT-B/16 | 0.780 ±0.026 | **0.842 ±0.056** | 0.699 ±0.056 | 0.798 ±0.037 | 0.901 ±0.037 | 0.659 ±0.074 | 12 |
+| ResNet-50 | 0.778 ±0.018 | 0.757 ±0.051 | 0.731 ±0.044 | 0.807 ±0.037 | 0.921 ±0.036 | 0.672 ±0.044 | 12 |
+| DINOv2 Probe | 0.767 ±0.016 | 0.742 ±0.068 | 0.763 ±0.024 | 0.770 ±0.038 | 0.887 ±0.010 | 0.675 ±0.039 | 12 |
 
-**All five judges now carry a 12-seed noise floor.** The VLM sweep
-(`vlm_sweep_tv918`, 12 seeds × ~2h40m) closed the last gap. Its macro AUC lead over
-CLIP is +0.031 against a pooled 2σ of 0.027 — detectable, but only just.
-
-Note the deployed VLM is **seed 43**, which scored macro AUC 0.823 against the
-12-seed mean of 0.814, and `too_thick` 0.786 against a mean of 0.759. A single seed
-flatters this judge; the sweep is what should be quoted.
-
-### 5b. F1 at 918-verified labels — same headers, secondary
+### 5b. F1 — same headers, secondary
 
 | Model | Macro F1 | `too_thick` | `broken_lines` | `missing_parts` | `missing_texture` | `extra_parts` | Seeds |
 |---|---|---|---|---|---|---|---|
-| VLM Fine-tuned (7B) | **0.621 ±0.027** | 0.398 ±0.077 | **0.483 ±0.116** | 0.694 ±0.031 | **0.958 ±0.030** | **0.573 ±0.059** | 12 |
-| CLIP Probe | 0.584 ±0.015 | 0.314 ±0.044 | 0.460 ±0.070 | **0.701 ±0.040** | 0.910 ±0.022 | 0.535 ±0.040 | 12 |
-| ViT-B/16 | 0.582 ±0.039 | **0.450 ±0.101** | 0.424 ±0.078 | 0.654 ±0.074 | 0.892 ±0.043 | 0.488 ±0.079 | 12 |
-| ResNet-50 | 0.581 ±0.031 | 0.359 ±0.086 | 0.452 ±0.080 | 0.670 ±0.051 | 0.916 ±0.029 | 0.509 ±0.050 | 12 |
-| DINOv2 Probe | 0.565 ±0.017 | 0.342 ±0.074 | 0.470 ±0.031 | 0.625 ±0.028 | 0.886 ±0.023 | 0.503 ±0.041 | 12 |
+| VLM Fine-tuned (7B) | **0.623 ±0.028** | 0.435 ±0.108 | 0.478 ±0.064 | 0.671 ±0.049 | **0.961 ±0.030** | **0.571 ±0.060** | 12 |
+| CLIP Probe | 0.594 ±0.018 | 0.367 ±0.048 | **0.480 ±0.049** | **0.684 ±0.045** | 0.906 ±0.019 | 0.534 ±0.026 | 12 |
+| ViT-B/16 | 0.584 ±0.025 | **0.495 ±0.088** | 0.404 ±0.091 | 0.662 ±0.045 | 0.892 ±0.032 | 0.468 ±0.095 | 12 |
+| ResNet-50 | 0.584 ±0.023 | 0.419 ±0.068 | 0.444 ±0.069 | 0.667 ±0.058 | 0.908 ±0.020 | 0.481 ±0.058 | 12 |
+| DINOv2 Probe | 0.569 ±0.016 | 0.403 ±0.062 | 0.467 ±0.045 | 0.628 ±0.034 | 0.878 ±0.008 | 0.471 ±0.054 | 12 |
 
-VLM thresholds are calibrated on **val** and applied fixed to test — nothing is
-fitted on what is reported.
+**The VLM leads both metrics** and is best or joint-best on four of five options.
+`too_thick` remains the weakest option for every judge except ViT-B/16, and carries
+the widest error bars in the fleet (F1 2σ up to 0.108).
 
-**The VLM is the best judge on both metrics, and now with error bars.** Macro F1
-+0.037 over CLIP against a pooled 2σ of 0.027 — detectable. At 407-verified it led
-on AUC but trailed CLIP on macro F1; it leads on both at 918-verified.
+### 5c. Did the new annotations help? A controlled decomposition
 
-### 5c. The same table at 407-verified labels — as presented 2026-08-06
+The naive comparison against the previous state is confounded: the retrain and the
+test set changed in the same step. To separate them, the tv974 models were
+**re-evaluated on the frozen pre-ingest 183-pair test** with train and val held
+bit-identical — same seeds, same weights (verified), only the evaluation set moves.
 
-Carried forward unchanged for comparison. Single seed (42), not a sweep.
-
-| Model | Macro AUC | Macro F1 | `too_thick` AUC | `broken_lines` AUC | `missing_parts` AUC | `missing_texture` AUC | `extra_parts` AUC |
-|---|---|---|---|---|---|---|---|
-| VLM Fine-tuned (7B) | **0.786** | 0.551 | 0.732 | 0.728 | 0.806 | **0.952** | 0.715 |
-| CLIP Probe | 0.779 | **0.578** | 0.753 | 0.690 | 0.811 | 0.914 | 0.726 |
-| DINOv2 Probe | 0.750 | 0.558 | 0.717 | 0.705 | 0.766 | 0.892 | 0.670 |
-| ResNet-50 | 0.731 | 0.511 | 0.716 | 0.706 | 0.745 | 0.907 | 0.579 |
-| ViT-B/16 | 0.713 | 0.546 | **0.776** | 0.625 | 0.712 | 0.813 | 0.638 |
-
-### 5d. Effect of the label correction — Δ AUC, 918 vs 407, gated on 2σ
-
-**A delta is called only if it exceeds the larger of the two sweeps' 2σ.** All four
-vision judges at 12 seeds each. **detected** in bold; everything else is n.s.
-
-| Model | Macro | `too_thick` | `broken_lines` | `missing_parts` | `missing_texture` | `extra_parts` |
+| Model | `too_thick` AUC 918/183 | 974/183 | 974/193 | **Learning effect** | **Test-set effect** | Naive total |
 |---|---|---|---|---|---|---|
-| ViT-B/16 | **+0.055** | +0.022 | **+0.080** | +0.051 | +0.040 | **+0.082** |
-| VLM Fine-tuned (7B) † | **+0.028** | +0.027 | **+0.045** | +0.014 | +0.004 | +0.050 |
-| ResNet-50 | +0.026 | −0.020 | +0.031 | +0.034 | −0.007 | **+0.092** |
-| DINOv2 Probe | +0.015 | −0.038 | **+0.067** | +0.016 | +0.004 | +0.023 |
-| CLIP Probe | +0.013 | −0.035 | +0.033 | +0.027 | −0.003 | **+0.045** |
-| **models detecting a gain** | **2 / 5** | **0 / 5** | **3 / 5** | **0 / 5** | **0 / 5** | **3 / 5** |
+| ResNet-50 | 0.720 | 0.738 | 0.757 | +0.018 | +0.020 | +0.037 |
+| ViT-B/16 | 0.824 | 0.834 | 0.842 | +0.010 | +0.008 | +0.018 |
+| CLIP Probe | 0.678 | 0.679 | 0.704 | **+0.001** | **+0.025** | +0.025 |
+| DINOv2 Probe | 0.694 | 0.714 | 0.742 | +0.020 | +0.028 | +0.048 |
 
-On F1: ResNet-50 `extra_parts` **+0.092** and DINOv2 `broken_lines` **+0.060** are
-detected; everything else n.s.
+**Learning effect, test held fixed: 0 detected out of 48** model × option × metric
+comparisons. Macro AUC moves +0.003, +0.004, −0.001, +0.000 against 2σ of
+0.015–0.025.
 
-† The VLM row compares its 12-seed mean at 918 against its **single** 407 run —
-there is no 407 VLM sweep, so that side has no error bar and the comparison is
-one-sided against the 918 noise floor. Its `too_thick` +0.027 sits well inside a 2σ
-of **0.077**, the widest error bar of any judge-option pair in the fleet.
-
-### 5e. Reading of §5d — what predicts a gain is the *direction* of the correction
-
-| Option | Corrections | Dominant direction | Models detecting a gain |
-|---|---|---|---|
-| `extra_parts` | 142 | **91%** one way (0→1) | **3 / 4** |
-| `broken_lines` | 88 | **86%** one way (1→0) | **2 / 4** |
-| `too_thick` | 136 | 71% one way | **0 / 4** |
-| `missing_parts` | 97 | 61% | 0 / 4 |
-| `missing_texture` | 68 | 63% (fewest corrections) | 0 / 4 |
-
-Among the three heavily-corrected options, **how consistently the labels were wrong
-in one direction predicts the gain better than how many were wrong.**
-`too_thick` had the second-most corrections and the least directional consistency,
-and gained nothing. `extra_parts` had the most one-sided correction and gained on
-three of four judges.
-
-| Prediction made before the retrain | Outcome |
+| Question | Answer |
 |---|---|
-| `broken_lines` improves (over-flagged, corrected down) | **confirmed** — detected on 3 of 5 |
-| `extra_parts` improves (under-flagged, corrected up) | **confirmed** — detected on 3 of 5 |
-| `too_thick` improves (136 corrections) | **not confirmed** — 0 of 5, wrong sign on 3 |
-| `missing_texture` unchanged (cleanest labels) | **confirmed** — 0 of 5 |
+| Did the 75 new pairs measurably improve the judges? | **No, not yet.** |
+| Then what produced the apparent `too_thick` gain? | The test set. 4 of the 5 new `too_thick` test positives are deliberate corruptions, which are easier than naturally occurring ones. For CLIP that accounts for the entire effect. |
+| Is this evidence that labelling does not help? | **No.** +56 training pairs is +6%. The measured floor says roughly 4× the positives are needed to halve the detection bar; a null result at this volume is the expected result. |
+| Is anything moving in the right direction? | Yes — the learning effect is positive on `too_thick` for 3 of 4 judges, just below the bar. |
 
-**`too_thick` is not explained by label noise, on all five judges.** The VLM was the
-last open question: at a single seed it appeared to gain +0.055 AUC, but its 12-seed
-sweep puts the mean at 0.759 with a 2σ of 0.077, so the gain is inside seed noise
-and the deployed seed 43 was simply a favourable draw. Nothing in the fleet improved
-on `too_thick` from a fully verified training set.
+This control cost ~1.5 h of GPU and no new modelling code. **It should ship with
+every future ingest**, or evaluation-split growth will keep inflating comparisons
+in the same direction.
 
-That makes it the one fine-structure failure that survives clean labels, and points
-at the representation rather than at more annotation. Standing caveat: it is also the
-thinnest class — 26 test positives, F1 2σ up to 0.139 — so an effect below that bar
-would be invisible either way.
+### 5d. Against the always-clean baseline — paired McNemar
 
-### 5f. Against the always-clean baseline — paired McNemar
+> **Measured on the 918-verified state (test = 183, always-clean 598/915).** Not
+> yet re-run at tv974: that needs a deployed fleet, and none was installed this
+> period pending these results. Carried forward unchanged.
 
 Always-clean = **598/915**. Net = decisions gained over answering "clean" to
 everything. **Bold = p<0.05.** Each fleet is scored at **its own val-fitted
-per-option thresholds** — see §5h for why that is not optional.
+per-option thresholds** — see §5f for why that is not optional.
 
 **Label state: 918-verified (current).**
 
@@ -266,7 +232,7 @@ per-option thresholds** — see §5h for why that is not optional.
 | DINOv2 Probe | +33 | 0.0745 n.s. | **−18** | **−22** | −1 | **+104** | **−30** |
 | ViT-B/16 | +13 | 0.5340 n.s. | **−16** | **−51** | −14 | **+104** | −10 |
 
-### 5g. What the relabelling changed at the decision level
+### 5e. What the relabelling changed at the decision level
 
 | | 407-verified | 918-verified |
 |---|---|---|
@@ -289,9 +255,9 @@ Count of options where each judge is significantly *worse* than a constant:
 `broken_lines` net improved for **all five** judges, and three of the four that
 were significantly worse than a constant no longer are. `too_thick` remains mixed
 — cleared for ResNet-50 and ViT-B/16, worse for CLIP and DINOv2 — consistent with
-§5e: it is the one option the relabelling did not fix.
+the earlier finding: it is the one option the relabelling did not fix.
 
-### 5h. Why the operating point had to be re-derived first
+### 5f. Why the operating point had to be re-derived first
 
 Thresholds are fitted to a fleet's score distribution and do not survive a
 retrain. Correcting the labels raised train `too_thick` positives 166 → 224, which
@@ -311,7 +277,7 @@ positives. Both tables above therefore use val-fitted thresholds, and
 `mcnemar_gate.py --thresholds` refuses a threshold file fitted on the split being
 reported.
 
-### 5i. Ensemble
+### 5g. Ensemble
 
 | Comparison | 407-verified | 918-verified | Verdict |
 |---|---|---|---|
@@ -333,30 +299,24 @@ a cleaner claim than five with none.
 
 ## 6. Noise floor — the bar any delta must clear
 
-12 seeds at a fixed label state, mean ± 2σ, test split. A change smaller than 2σ
-is not a result.
+12 seeds per judge, mean ± 2σ, **tv974 test (193 pairs)**. A change smaller than
+2σ is not a result.
 
-| Model | Macro AUC | Macro F1 | F1 `too_thick` | F1 `extra_parts` | Label state |
-|---|---|---|---|---|---|
-| VLM Fine-tuned (7B) | 0.814 ±0.027 | 0.621 ±0.027 | 0.398 ±0.077 | 0.573 ±0.059 | **918** |
-| CLIP Probe | 0.783 ±0.011 | 0.584 ±0.015 | 0.314 ±0.044 | 0.535 ±0.040 | **918** |
-| ViT-B/16 | 0.783 ±0.025 | 0.582 ±0.039 | 0.450 ±**0.101** | 0.488 ±0.079 | **918** |
-| ResNet-50 | 0.777 ±0.020 | 0.581 ±0.031 | 0.359 ±0.086 | 0.509 ±0.050 | **918** |
-| DINOv2 Probe | 0.765 ±0.023 | 0.565 ±0.017 | 0.342 ±0.074 | 0.503 ±0.041 | **918** |
-| CLIP Probe | 0.769 ±0.016 | 0.581 ±0.025 | 0.352 ±0.041 | 0.531 ±0.041 | 407 |
-| DINOv2 Probe | 0.751 ±0.015 | 0.558 ±0.023 | 0.401 ±0.052 | 0.457 ±0.054 | 407 |
-| ResNet-50 | 0.751 ±0.029 | 0.565 ±0.030 | 0.377 ±**0.139** | 0.416 ±0.074 | 407 |
-| ViT-B/16 | 0.728 ±0.027 | 0.547 ±0.032 | 0.443 ±**0.114** | 0.421 ±0.094 | 407 |
+| Model | Macro AUC | Macro F1 | F1 `too_thick` | F1 `extra_parts` |
+|---|---|---|---|---|
+| VLM Fine-tuned (7B) | 0.826 ±0.018 | 0.623 ±0.028 | 0.435 ±**0.108** | 0.571 ±0.060 |
+| CLIP Probe | 0.790 ±0.014 | 0.594 ±0.018 | 0.367 ±0.048 | 0.534 ±0.026 |
+| ViT-B/16 | 0.780 ±0.026 | 0.584 ±0.025 | 0.495 ±0.088 | 0.468 ±0.095 |
+| ResNet-50 | 0.778 ±0.018 | 0.584 ±0.023 | 0.419 ±0.068 | 0.481 ±0.058 |
+| DINOv2 Probe | 0.767 ±0.016 | 0.569 ±0.016 | 0.403 ±0.062 | 0.471 ±0.054 |
 
-**Consequence:** on the thin classes, effects below ~0.10 are undetectable at 183
-test pairs. `too_thick` has 26 positives and a 2σ of up to 0.139 — wider than most
-effects worth reporting. The VLM's `too_thick` 2σ of 0.077 on AUC is the widest in
-the fleet and is why its apparent gain there could not be called (§5e).
+**Consequence.** `too_thick` has 31 test positives and an F1 2σ up to 0.108, so
+effects below ~0.10 on it are invisible. This is why §5c can report a null and why
+collection alone is a slow lever: the 75 new pairs moved the `too_thick` positive
+count from 26 to 31.
 
-Regenerate with `research/baselines/summarize_sweep.py <sweep_root> --markdown`;
-add `--vs <previous_root>` to gate deltas on 2σ automatically.
-
----
+Regenerate with `research/baselines/summarize_sweep.py <root> --markdown`; add
+`--vs <previous_root>` to gate deltas on 2σ automatically.
 
 ## 7. Label quality — the central finding, now replicated
 
@@ -418,51 +378,66 @@ when this document became a status report: `git show 4b84e04:README.md`.
 
 ---
 
-## 9. In flight
+## 9. Compute this period
 
-**This period is closed — everything below COMPLETED, exit 0, on 2026-08-07/08.**
+All jobs COMPLETED, exit 0. Nothing is running.
 
-| Job(s) | What | Requested | Actual |
+| Jobs | What | Requested | Actual |
 |---|---|---|---|
-| 19279792 | `backbones` 12-seed sweep @ 918 | 1:05 | 44:31 |
-| 19279793 | `clip` 12-seed sweep @ 918 | 0:45 | 16:01 |
-| 19279794 | `dino` 12-seed sweep @ 918 | 0:25 | 12:49 |
-| 19280190 | Qwen2-VL-7B LoRA @ 918 (deployed seed 43) | 4:00 | 2:37:59 |
-| 19290283/85/86 | seed-42 vision judges @ 918, for deployment | 0:20 ea | 4m07s / 2m11s / 1m01s |
-| 19297548 | score the installed fleet on test | 0:30 | 2:45 |
-| 19298127 | re-derive val thresholds for the new fleet | 0:30 | 2:33 |
-| 19290309–19290315 | **VLM 12-seed sweep**, 6 parallel jobs | 6:00 ea | 5:20–5:52 |
+| 19279792–19280190 | 918-verified retrain, 4 vision sweeps + VLM | — | 12m–2h38m |
+| 19290283–19298127 | deploy seed-42 fleet, score, re-derive thresholds | 0:20–0:30 | 1m–4m |
+| 19290309–19290315 | VLM 12-seed sweep @ 918, 6 parallel jobs | 6:00 | 5:20–5:52 |
+| 19991210–19991212 | tv974 vision sweeps, cold cache | 0:35–1:10 | 16m–49m |
+| 19991213–19991218 | tv974 VLM 12-seed sweep, 6 parallel | 7:00 | 5:38–6:01 |
+| 19994706–19994708 | **frozen-test control**, identical models | 0:35–1:10 | 16m–45m |
 
-Outputs: `sweep_tv918/`, `vlm_sweep_tv918/`, `output_7b_tv918/`, `models_tv918/`.
-Per-seed summaries exported to `experiments_out/sweep_summaries/*.json`.
+Three complete 12-seed sweeps of all five judges this period. Walltime is sized
+from measured runtimes: everything at ≤1h10 started within ~15 minutes, while a 6h
+request queued behind concurrent jobs was once scheduled ~42 h out.
 
-Walltime was right-sized from measured runtimes rather than left at script defaults.
-That is the only lever on start time at fair-share 0.16, and the effect is stark:
-every job at ≤1h05 started within ~15 minutes, while a 6h request was scheduled
-**~42 hours out**. The VLM sweep ran as 6 concurrent 2-seed jobs rather than one
-serial job — with 2h40m per seed, compute dominates queue latency and the usual
-"loop seeds inside one job" rule inverts.
+Outputs: `sweep_tv974/`, `vlm_sweep_tv974/`, `sweep_tv974_frozentest/`,
+`sweep_tv918/`, `vlm_sweep_tv918/`. Per-seed summaries cached in
+`experiments_out/sweep_summaries/`.
 
-**Deployed:** `models/` is the 918-verified fleet (vision seed 42, VLM seed 43),
-provenance in `FLEET_MANIFEST.json`, val thresholds re-derived for it.
+**Deployed fleet is still the 918-verified one.** No tv974 fleet was installed —
+§5c says there is nothing to gain from redeploying yet.
 
 ---
 
 ## 10. Next
 
-Modelling work on dataset v1 is **complete and closed**. Everything remaining is
-either annotation effort or waits on more collected samples.
+The data-side levers are now measured. Correcting labels helped; adding 6% more
+data did not. `too_thick` and `broken_lines` remain the failures, and §5c shows
+more of the same collection will not move them quickly.
 
-| # | Task | Blocked on | Value |
+| # | Task | Cost | Rationale |
 |---|---|---|---|
-| 1 | **Collection round 2** — more samples | annotation time | paused at 4 pairs. **Seed images likely to produce thick or broken lines**: `too_thick` is the thinnest class, the noisiest, and the one clean labels did not fix. Class balance beats volume. |
-| 2 | **Ceiling study** — double-annotate ~100 pairs with a time gap | annotation effort only, no GPU | the decisive experiment: separates "wrong representation" from "irreducibly noisy target" for `too_thick` |
-| 3 | Dense patch features vs global CLS vector | — | the last modelling explanation for `too_thick` now that labels are ruled out on all five judges. Falsifiable: should move `too_thick`/`broken_lines` and leave `missing_texture` alone. |
-| 4 | Rework the VLM question set to the BANA wording | a VLM retrain | drafted and gated in `research/vlm/questions_v4_bana.py`, parked because `broken_lines` overshot. That file says to revisit once the holdout has >8 positives — i.e. after this collection round. |
-| 5 | Expert rating exercise on sampled outputs | protocol design | RQ4's second half; light protocol, no recruitment |
-| 6 | Supervisor's suggested experiments from 2026-08-06 | to be specified | — |
+| 1 | **Morphological / topological features** for `too_thick` + `broken_lines` | hours, CPU only | The defects are geometric. A distance transform of the ink mask *is* stroke width; skeleton endpoints and connected components *are* line continuity. These encode what a global embedding provably cannot. |
+| 2 | **Patch-level features + attention pooling (MIL)** in place of the global CLS vector | ~1 day, reuses the feature cache | Borrowed from computational pathology, where a slide-level label must be explained by sparse local evidence — structurally identical to a 3-pixel gap under a pair-level label. Attention weights also localize the defect, which feeds the editing loop. |
+| 3 | Continue collection, seeded for `broken_lines` | annotation time | 39 test positives; the thin classes still bound what is measurable. |
+| 4 | **Ceiling study** — double-annotate ~100 pairs with a time gap | annotation only | Separates "wrong representation" from "irreducibly noisy target" for `too_thick`. |
+| 5 | Rework the VLM question set to the BANA wording | a VLM retrain | Drafted in `research/vlm/questions_v4_bana.py`; unblocked now the holdout has more positives. |
+| 6 | Expert rating exercise on sampled outputs | protocol design | RQ4's second half. |
 
-### 10a. Why the ceiling study is the highest-value item
+### 10a. Why the architecture direction, and why now
+
+| Evidence | Implication |
+|---|---|
+| `too_thick` did not improve from correcting 136 labels (0 of 5 judges) | not label noise |
+| `too_thick` did not improve from +35 training positives (0 of 48 comparisons) | not data volume, at this scale |
+| Judges flag `too_thick` 4/5 on a dense keyboard drawing but **0/5** on a pencil whose strokes tripled | they appear to encode **ink density**, not line-width-to-spacing ratio |
+| `too_thick` and `broken_lines` criteria never reference the photograph | both are properties of the rendering alone — the pair comparison, and its registration problem, is not needed for them |
+
+The last row is the cheapest win available: two of the five options can be modelled
+as single-image problems, which removes the unregistered-pair difficulty from
+exactly the two options that are failing.
+
+**Falsifiable prediction.** Patch-level or morphological features should move
+`too_thick` and `broken_lines` and leave `missing_texture` unchanged. If they do
+not, the remaining explanation is that the target itself is unstable — which is
+what the ceiling study measures.
+
+### 10b. The ceiling study, and why it is now decisive
 
 | | |
 |---|---|
@@ -477,7 +452,8 @@ One accidental instance already exists: a pair re-annotated 2 days after its fir
 pass disagreed on 1 of 5 options. That is n=1 — not a measurement, but it confirms
 the protocol runs on existing tooling.
 
-### 10b. Open question for discussion
+
+### 10c. Open question for discussion
 
 Is a measured ceiling on human agreement acceptable as a **primary** contribution,
 or does Chapter 5 need a positive modelling result alongside it?
