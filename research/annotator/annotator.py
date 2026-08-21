@@ -17,7 +17,16 @@ On startup the app lands on the first unannotated pair automatically.
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from _paths import DATA_ROOT  # noqa: E402
+from _paths import DATA_ROOT, REPO_ROOT  # noqa: E402
+
+# The deployed package lives at the repo root, one level above research/.
+# Without this the VLM threshold import below fails and, because it used to sit
+# inside vlm_panel(), a single ImportError blanked every component on the page.
+sys.path.insert(0, str(REPO_ROOT))
+try:
+    from evaluators.constants import VLM_THRESHOLDS_CALIBRATED as VLM_THR  # noqa: E402
+except Exception:  # thresholds are a nicety; never let them break annotation
+    VLM_THR = {}
 
 import json
 import argparse
@@ -29,6 +38,11 @@ _GR_MAJOR = int(gr.__version__.split('.')[0])
 
 ANNOTATIONS_FILE = DATA_ROOT / "annotations.jsonl"
 IMAGES_BASE      = DATA_ROOT / "images"
+# Tactile images normally sit in the same corpus as the natural ones. A
+# generated batch does not -- verify_generated_batch/images/ holds corrupted
+# renderings whose natural partners are still in the corpus -- so the two roots
+# are resolved separately. Defaults to IMAGES_BASE, i.e. unchanged behaviour.
+TACTILE_BASE     = None
 
 # non_conformant retired from the UI 2026-08-03: it is not in the deployed
 # ALL_OPTIONS, no evaluator scores it, and it is not collected any more.
@@ -100,9 +114,36 @@ records: list[dict] = []  # populated after CLI args are parsed
 
 def first_unannotated() -> int:
     for i, r in enumerate(records):
-        if not r['annotated']:
+        if not r['annotated'] and not r.get('excluded'):
             return i
     return 0  # all annotated — start from beginning
+
+
+def set_excluded(idx: int, flag: bool) -> str:
+    """Flag a pair as excluded from the dataset. Non-destructive by design.
+
+    The image stays on disk and the record stays in the file -- only the flag
+    moves, so an exclusion is always reversible and the reason it was excluded
+    remains inspectable. Downstream ingest filters on `excluded`.
+    """
+    ts = datetime.now().isoformat(timespec='seconds')
+    r = records[idx]
+    if flag:
+        # Excluded pairs must not reappear in the unannotated queue, so they are
+        # marked annotated -- but the PRIOR state is stashed first, or
+        # un-excluding would silently leave an unlabelled pair looking done.
+        r.setdefault('annotated_before_exclude', bool(r.get('annotated', False)))
+        r['annotated'] = True
+    else:
+        r['annotated'] = bool(r.pop('annotated_before_exclude', False))
+    r['excluded'] = bool(flag)
+    r['excluded_at'] = ts if flag else None
+    fresh = load_records()
+    fresh[idx] = r
+    save_records(fresh)
+    for i, rec in enumerate(fresh):
+        records[i] = rec
+    return ts
 
 
 def commit(idx: int, checkbox_values: list[bool]) -> str:
@@ -136,13 +177,19 @@ def commit(idx: int, checkbox_values: list[bool]) -> str:
 # ─── UI helpers ─────────────────────────────────────────────────────────────
 
 def progress_line() -> str:
-    n_done = sum(1 for r in records if r['annotated'])
-    return f"**{n_done} / {len(records)}** annotated  ·  {len(records) - n_done} remaining"
+    n_done = sum(1 for r in records if r['annotated'] and not r.get('excluded'))
+    n_exc  = sum(1 for r in records if r.get('excluded'))
+    left   = len(records) - n_done - n_exc
+    tail   = f"  ·  🚫 {n_exc} excluded" if n_exc else ""
+    return f"**{n_done} / {len(records)}** annotated  ·  {left} remaining{tail}"
 
 
 def pair_header(idx: int) -> str:
     r = records[idx]
-    status = "✅ annotated" if r['annotated'] else "⏳ not yet annotated"
+    if r.get('excluded'):
+        status = "🚫 **EXCLUDED from the dataset** — use ↩ Un-exclude to restore"
+    else:
+        status = "✅ annotated" if r['annotated'] else "⏳ not yet annotated"
     return (
         f"### Pair {idx + 1} / {len(records)}  ·  "
         f"{r['category'].replace('_', ' ')} › **{r['object']}**  ·  {status}\n\n"
@@ -150,9 +197,44 @@ def pair_header(idx: int) -> str:
     )
 
 
-def resolve(rel: str) -> str | None:
-    p = IMAGES_BASE / rel
+def resolve(rel: str, base: Path | None = None) -> str | None:
+    if not rel:
+        return None
+    p = Path(rel)
+    if not p.is_absolute():
+        p = (base or IMAGES_BASE) / rel
     return str(p) if p.exists() else None
+
+
+def vlm_panel(idx: int) -> str:
+    """Show what the VLM said, and be explicit that it is a suggestion.
+
+    Pre-ticks come from the fine-tuned VLM at its val-calibrated thresholds. On
+    a deliberate-corruption batch `too_thick` is ticked almost everywhere by
+    construction, so the informative part is the other four -- what else the
+    generator changed while it was thickening the strokes.
+    """
+    try:
+        r = records[idx]
+        probs = r.get("vlm_scores") or {}
+        if not probs:
+            return ""
+        cells = []
+        for k in OPTION_KEYS:
+            pv = probs.get(k)
+            if pv is None:
+                continue
+            t = VLM_THR.get(k)
+            if t is None:
+                cells.append(f"**{OPTION_LABELS[k]}** {pv:.3f}")
+            else:
+                cells.append(f"{'✓' if pv >= t else '·'} **{OPTION_LABELS[k]}** {pv:.3f} _(t={t})_")
+        return ("*VLM Fine-tuned (7B) — suggestion only, correct it against what you see:*  \n"
+                + "  ·  ".join(cells))
+    except Exception as exc:
+        # A broken suggestion panel must never take the images and checkboxes
+        # down with it -- that is exactly what happened the first time.
+        return f"_(VLM panel unavailable: {type(exc).__name__})_"
 
 
 def cb_values(idx: int) -> list[bool]:
@@ -164,8 +246,8 @@ def load_pair(idx: int) -> list:
     """Return all outputs needed to render pair idx."""
     r   = records[idx]
     nat = resolve(r['natural_image'])
-    tac = resolve(r['tactile_image'])
-    return [pair_header(idx), nat, tac] + cb_values(idx) + [""]
+    tac = resolve(r['tactile_image'], TACTILE_BASE)
+    return [pair_header(idx), nat, tac, vlm_panel(idx)] + cb_values(idx) + [""]
 
 
 # ─── Gradio app ─────────────────────────────────────────────────────────────
@@ -174,6 +256,7 @@ CSS = """
 .pair-header { font-size: 1rem; }
 .defect-section { border-top: 1px solid #e5e7eb; padding-top: 0.75rem; margin-top: 0.5rem; }
 .conform-section { border-top: 2px solid #d1d5db; padding-top: 0.75rem; margin-top: 0.75rem; }
+.vlm-panel { font-size: 0.9rem; opacity: 0.9; border-left: 3px solid #93c5fd; padding-left: 0.6rem; }
 """
 
 _blocks_kwargs = {} if _GR_MAJOR >= 6 else {'css': CSS, 'theme': gr.themes.Soft()}
@@ -199,6 +282,9 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
         nat_img = gr.Image(label="Natural Image",  height=500)
         tac_img = gr.Image(label="Tactile Image",  height=500)
 
+    # ── VLM suggestion ───────────────────────────────────────────────────────
+    vlm_md = gr.Markdown(elem_classes=["vlm-panel"])
+
     # ── Defect checkboxes ────────────────────────────────────────────────────
     gr.Markdown("### Defects present in the tactile image  *(check all that apply)*")
 
@@ -216,7 +302,9 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
 
     # ── Save controls ────────────────────────────────────────────────────────
     with gr.Row():
-        save_btn = gr.Button("💾  Save (stay on this pair)", size="sm", scale=0)
+        save_btn    = gr.Button("💾  Save (stay on this pair)", size="sm", scale=0)
+        exclude_btn = gr.Button("🚫  Exclude & Next", variant="stop", size="sm", scale=0)
+        include_btn = gr.Button("↩  Un-exclude (stay)", size="sm", scale=0)
 
     status_md = gr.Markdown()
 
@@ -224,9 +312,9 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
     all_cbs = [cb_too_thick, cb_broken, cb_miss_parts, cb_miss_tex, cb_extra]
 
     # ── Output lists (must be consistent across all handlers) ────────────────
-    #   load_pair() returns: [header, nat, tac, cb×5, status]  = 9 items
-    pair_outputs  = [header_md, nat_img, tac_img] + all_cbs + [status_md]
-    nav_outputs   = [cur_idx] + pair_outputs          # 10 items
+    #   load_pair() returns: [header, nat, tac, vlm, cb×5, status]  = 10 items
+    pair_outputs  = [header_md, nat_img, tac_img, vlm_md] + all_cbs + [status_md]
+    nav_outputs   = [cur_idx] + pair_outputs          # 11 items
 
     # ── Event handlers ───────────────────────────────────────────────────────
 
@@ -250,12 +338,30 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
         ts = commit(idx, list(cbs))
         return [pair_header(idx), f"✅ Saved at {ts}"]
 
+    def _next_open(start):
+        """First pair at or after `start` that is neither annotated nor excluded."""
+        n = start
+        while n < len(records) and (records[n]['annotated'] or records[n].get('excluded')):
+            n += 1
+        return n
+
+    def on_exclude(idx, *cbs):
+        """Flag and move on. The checkboxes are NOT saved — an excluded pair is
+        being dropped, so whatever was ticked on it is not a label."""
+        set_excluded(idx, True)
+        new = _next_open(idx + 1)
+        if new >= len(records):
+            return [idx] + load_pair(idx)[:-1] + ["🚫 Excluded. No pairs left to review."]
+        return [new] + load_pair(new)
+
+    def on_include(idx):
+        ts = set_excluded(idx, False)
+        return [pair_header(idx), f"↩ Restored at {ts} — still needs annotating"]
+
     def on_save_next(idx, *cbs):
         commit(idx, list(cbs))
-        # Advance to next unannotated pair after current position
-        new = idx + 1
-        while new < len(records) and records[new]['annotated']:
-            new += 1
+        # Advance to the next pair that is neither annotated nor excluded
+        new = _next_open(idx + 1)
         if new >= len(records):
             # All done — stay and show a banner
             return [idx] + load_pair(idx)[:-1] + ["🎉 All pairs annotated!"]
@@ -273,6 +379,9 @@ with gr.Blocks(title="TactileEval Annotator", **_blocks_kwargs) as demo:
                    outputs=[header_md, status_md])
     save_next_btn.click(on_save_next, inputs=[cur_idx] + all_cbs,
                         outputs=nav_outputs)
+    exclude_btn.click(on_exclude,  inputs=[cur_idx] + all_cbs, outputs=nav_outputs)
+    include_btn.click(on_include,  inputs=[cur_idx],
+                      outputs=[header_md, status_md])
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
@@ -286,12 +395,18 @@ if __name__ == '__main__':
                         help='Path to annotations.jsonl (default: <TACTILE_DATA_ROOT>/annotations.jsonl)')
     parser.add_argument('--images-dir', type=str, default=None,
                         help='Path to images root directory (default: <TACTILE_DATA_ROOT>/images/)')
+    parser.add_argument('--tactile-dir', type=str, default=None,
+                        help='Separate root for TACTILE images. Use when reviewing a generated '
+                             'batch whose renderings live outside the corpus while their natural '
+                             'partners remain in it.')
     args = parser.parse_args()
 
     if args.annotations_file:
         ANNOTATIONS_FILE = Path(args.annotations_file)
     if args.images_dir:
         IMAGES_BASE = Path(args.images_dir)
+    if args.tactile_dir:
+        TACTILE_BASE = Path(args.tactile_dir)
 
     records.extend(load_records())
 
@@ -299,6 +414,11 @@ if __name__ == '__main__':
     demo.launch(
         share=args.share,
         server_port=args.port,
-        allowed_paths=[str(IMAGES_BASE)],
+        # Gradio refuses to serve any file outside the working directory unless
+        # it is allow-listed, and one disallowed path fails the WHOLE output
+        # batch -- both images and every checkbox render as "Error". A generated
+        # batch keeps its tactile renderings outside the corpus, so that root
+        # has to be listed too.
+        allowed_paths=[p for p in {str(IMAGES_BASE), str(TACTILE_BASE or IMAGES_BASE)}],
         **_launch_kwargs,
     )

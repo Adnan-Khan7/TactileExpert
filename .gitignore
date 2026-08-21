@@ -71,3 +71,7 @@ research/**/data/
 research/**/images/
 research/**/experiments_out/
 
+
+# Deliberate-corruption verification batch (2026-08-19) — generated images,
+# reviewed in the annotator before any ingest. Large and reproducible.
+verify_generated_batch*/

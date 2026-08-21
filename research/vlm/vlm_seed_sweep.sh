@@ -64,13 +64,16 @@ if [ -z "$OUT_ROOT" ] || [ ${#SEEDS[@]} -eq 0 ]; then
     exit 1
 fi
 
-VQA="$TACTILE_DATA_ROOT/data/vqa_v3_unified"
+# Overridable so a new dataset state gets its own VQA build rather than
+# overwriting the previous one — same reasoning as TACTILE_SPLITS in
+# seed_sweep.sh: one directory per state keeps a reported number traceable.
+VQA="${TACTILE_VQA:-$TACTILE_DATA_ROOT/data/vqa_v3_unified}"
 for f in train.jsonl val.jsonl test.jsonl; do
     if [ ! -s "$VQA/$f" ]; then
         echo "REFUSING: $VQA/$f is missing or empty." >&2
         echo "  Build it ONCE before launching parallel seeds:" >&2
         echo "    python $REPO/research/vlm/build_vqa_v2.py \\" >&2
-        echo "        --splits-dir data/splits_v3_unified --out-dir data/vqa_v3_unified" >&2
+        echo "        --splits-dir <splits> --out-dir $VQA" >&2
         exit 1
     fi
 done
@@ -92,7 +95,7 @@ for s in "${SEEDS[@]}"; do
     echo "===== seed $s -> $D  ($(date +%H:%M:%S)) ====="
     python "$REPO/research/vlm/step9_finetune_vlm.py" \
         --model-path Qwen/Qwen2-VL-7B-Instruct \
-        --vqa-dir data/vqa_v3_unified \
+        --vqa-dir "$VQA" \
         --out-dir "$D" \
         --seed "$s" \
         --patience 5 \
